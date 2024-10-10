@@ -170,7 +170,7 @@ class DSMCSimulation:
         self.positions += self.velocities * self.time_step
         
         # Apply periodic boundary conditions
-        self.positions = np.mod(self.positions, self.domain_size)
+        self.positions = np.mod(self.positions, self.domain_size) # PERIODIC BOUNDARY CONDITIONS
 
     def dsmc_step(self):
         """Perform one step of BL-DSMC simulation, including particle collisions within cells and updating positions."""
