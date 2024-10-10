@@ -6,10 +6,11 @@ from tensorflow.keras.models import load_model
 import tqdm
 
 class DSMCSimulation:
-    def __init__(self, n_particles, n_steps, use_mdn=False, mdn_model=None, T_tr_initial=380, T_rot_initial=180, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
+    def __init__(self, n_particles, n_steps, time_step=1e-6, use_mdn=False, mdn_model=None, T_tr_initial=380, T_rot_initial=180, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
+        self.time_step = time_step  # Set timestep (in seconds)
         self.T_tr_initial = T_tr_initial
         self.T_rot_initial = T_rot_initial
         self.Z_r = Z_r
@@ -106,7 +107,6 @@ class DSMCSimulation:
         kinetic_energy2 = self.compute_kinetic_energy(velocity2)
         rotational_energy1, rotational_energy2 = self.rotational_energy[idx1], self.rotational_energy[idx2]
 
-
         # If we use the MDN, we replace the BL energy exchange process
         if self.use_mdn:
              # Pre-collision energy fractions and total energy
@@ -128,7 +128,6 @@ class DSMCSimulation:
             rotational_energy1 = eps_r1_post * (1 - eps_t_post) * Ec_post
             kinetic_energy2 = (1 - eps_t_post) * Ec_post - rotational_energy1
             rotational_energy2 = (1 - eps_r1_post) * (1 - eps_t_post) * Ec_post
-
 
         else:
             # Default to BL model
@@ -166,8 +165,19 @@ class DSMCSimulation:
         total_rotational_energy = np.sum(self.rotational_energy)
         return total_kinetic_energy, total_rotational_energy
 
+    def update_positions(self):
+        """Update particle positions based on velocity and timestep, applying periodic boundary conditions."""
+        self.positions += self.velocities * self.time_step
+        
+        # Apply periodic boundary conditions
+        self.positions = np.mod(self.positions, self.domain_size)
+
     def dsmc_step(self):
-        """Perform one step of BL-DSMC simulation, including particle collisions within cells."""
+        """Perform one step of BL-DSMC simulation, including particle collisions within cells and updating positions."""
+        # Update particle positions based on velocities and timestep
+        self.update_positions()
+
+        # Re-assign particles to cells after position update
         self.assign_to_cells()
 
         # Loop over cells to perform collisions within each cell
@@ -211,7 +221,6 @@ class DSMCSimulation:
 
                 pbar.update(1)
 
-
         print("Simulation complete.")
 
     def plot_energy_relaxation(self, mode='full'):
@@ -231,8 +240,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DSMC Simulation")
 
     parser.add_argument("--mdn", type=str, default=None, help="Path to the trained MDN model")
-    parser.add_argument("--n_particles", type=int, default= 50000,  help="Number of particles")
-    parser.add_argument("--n_steps", type=int, default= 1000, help="Number of steps")
+    parser.add_argument("--n_particles", type=int, default=50000, help="Number of particles")
+    parser.add_argument("--n_steps", type=int, default=1000, help="Number of steps")
+    parser.add_argument("--time_step", type=float, default=1e-6, help="Timestep in seconds")
 
     args = parser.parse_args()
 
@@ -244,9 +254,6 @@ if __name__ == "__main__":
         use_mdn = False
         mdn_model = None
 
-    
-    dsmc = DSMCSimulation(n_particles=args.n_particles, n_steps=args.n_steps, use_mdn=use_mdn, mdn_model=mdn_model)
+    dsmc = DSMCSimulation(n_particles=args.n_particles, n_steps=args.n_steps, time_step=args.time_step, use_mdn=use_mdn, mdn_model=mdn_model)
     dsmc.run_simulation()
     dsmc.plot_energy_relaxation()
-
-
