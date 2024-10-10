@@ -1,9 +1,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import tensorflow as tf
 import argparse
+from tensorflow.keras.models import load_model
+import tqdm
 
 class DSMCSimulation:
-    def __init__(self, n_particles, n_steps, T_tr_initial=380, T_rot_initial=180, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
+    def __init__(self, n_particles, n_steps, use_mdn=False, mdn_model=None, T_tr_initial=380, T_rot_initial=180, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
@@ -16,6 +19,10 @@ class DSMCSimulation:
         self.sigma_collision = sigma_collision
         self.k_B = 1.38e-23  # Boltzmann constant (J/K)
         self.m_H2 = 3.34e-26  # Mass of hydrogen molecule (kg)
+
+        # Option to use the MDN-based surrogate model
+        self.use_mdn = use_mdn
+        self.mdn_model = mdn_model  # The MDN model passed during initialization
         
         # Initialize arrays for positions, velocities, and energies
         self.positions = self.initialize_positions()
@@ -65,10 +72,30 @@ class DSMCSimulation:
         new_rotational_energy = total_energy - new_kinetic_energy
         return new_kinetic_energy, new_rotational_energy
 
-    def calculate_relative_velocity(self, vel1, vel2):
-        """Calculate the relative velocity between two particles."""
-        relative_velocity = vel1 - vel2
-        return np.linalg.norm(relative_velocity)
+    def sigmoid(self, x):
+        """Sigmoid function."""
+        return 1 / (1 + np.exp(-x))
+
+    def inv_sigmoid(self, x):
+        """Inverse sigmoid function."""
+        return np.log((x) / (1 - x))
+
+    def mdn_energy_exchange(self, pre_collisional_energies):
+        """Use the trained MDN to predict post-collisional energies."""
+        # Input format: [log(E_c), inv_sigmoid(eps_t), inv_sigmoid(eps_r1)]
+        log_Ec, inv_eps_t, inv_eps_r1 = pre_collisional_energies
+        input_data = np.array([[log_Ec, inv_eps_t, inv_eps_r1]])
+
+        # Perform prediction
+        predictions = self.mdn_model.predict(input_data)
+
+        # Extract predictions and transform back
+        log_Ecp, inv_eps_tp, inv_eps_r1p = predictions[0]
+        Ec_post = np.exp(log_Ecp)
+        eps_t_post = self.sigmoid(inv_eps_tp)
+        eps_r1_post = self.sigmoid(inv_eps_r1p)
+
+        return Ec_post, eps_t_post, eps_r1_post
 
     def perform_collision(self, idx1, idx2, max_relative_velocity):
         """Handle the collision between two particles."""
@@ -77,16 +104,45 @@ class DSMCSimulation:
 
         kinetic_energy1 = self.compute_kinetic_energy(velocity1)
         kinetic_energy2 = self.compute_kinetic_energy(velocity2)
+        rotational_energy1, rotational_energy2 = self.rotational_energy[idx1], self.rotational_energy[idx2]
 
-        # Probability of collision based on relative velocity
-        if np.random.rand() < relative_velocity / max_relative_velocity:
-            # Inelastic collision
+
+        # If we use the MDN, we replace the BL energy exchange process
+        if self.use_mdn:
+             # Pre-collision energy fractions and total energy
+            Etr_total_pre = kinetic_energy1 + kinetic_energy2
+            Er_total_pre = rotational_energy1 + rotational_energy2
+
+            eps_t = kinetic_energy1 / (kinetic_energy1 + rotational_energy1)
+            eps_r1 = rotational_energy1 / (rotational_energy1 + rotational_energy2)
+
+            pre_collisional_energies = [
+                np.log(Etr_total_pre),
+                self.inv_sigmoid(eps_t),
+                self.inv_sigmoid(eps_r1)
+            ]
+
+            Ec_post, eps_t_post, eps_r1_post = self.mdn_energy_exchange(pre_collisional_energies)
+
+            kinetic_energy1 = eps_t_post * Ec_post
+            rotational_energy1 = eps_r1_post * (1 - eps_t_post) * Ec_post
+            kinetic_energy2 = (1 - eps_t_post) * Ec_post - rotational_energy1
+            rotational_energy2 = (1 - eps_r1_post) * (1 - eps_t_post) * Ec_post
+
+
+        else:
+            # Default to BL model
             if np.random.rand() < self.p_inelastic:
-                kinetic_energy1, self.rotational_energy[idx1] = self.borgnakke_larsen_collision(kinetic_energy1, self.rotational_energy[idx1])
-                kinetic_energy2, self.rotational_energy[idx2] = self.borgnakke_larsen_collision(kinetic_energy2, self.rotational_energy[idx2])
+                kinetic_energy1, rotational_energy1 = self.borgnakke_larsen_collision(kinetic_energy1, rotational_energy1)
+                kinetic_energy2, rotational_energy2 = self.borgnakke_larsen_collision(kinetic_energy2, rotational_energy2)
 
-                self.velocities[idx1] *= np.sqrt(kinetic_energy1 / self.compute_kinetic_energy(velocity1))
-                self.velocities[idx2] *= np.sqrt(kinetic_energy2 / self.compute_kinetic_energy(velocity2))
+        # Update the rotational energy
+        self.rotational_energy[idx1] = rotational_energy1
+        self.rotational_energy[idx2] = rotational_energy2
+
+        # Rescale the velocities based on the new kinetic energy
+        self.velocities[idx1] *= np.sqrt(kinetic_energy1 / self.compute_kinetic_energy(velocity1))
+        self.velocities[idx2] *= np.sqrt(kinetic_energy2 / self.compute_kinetic_energy(velocity2))
 
     def max_relative_velocity_in_cell(self, particles_in_cell):
         """Calculate the maximum relative velocity among all pairs in a cell."""
@@ -99,13 +155,18 @@ class DSMCSimulation:
                     max_rel_velocity = rel_velocity
         return max_rel_velocity
 
+    def calculate_relative_velocity(self, vel1, vel2):
+        """Calculate the relative velocity between two particles."""
+        relative_velocity = vel1 - vel2
+        return np.linalg.norm(relative_velocity)
+
     def calculate_total_energy(self):
         """Calculate the total translational and rotational energy in the system."""
         total_kinetic_energy = np.sum([self.compute_kinetic_energy(vel) for vel in self.velocities])
         total_rotational_energy = np.sum(self.rotational_energy)
         return total_kinetic_energy, total_rotational_energy
 
-    def bl_dsmc_step(self):
+    def dsmc_step(self):
         """Perform one step of BL-DSMC simulation, including particle collisions within cells."""
         self.assign_to_cells()
 
@@ -134,17 +195,22 @@ class DSMCSimulation:
         self.rotational_energy_history = []
 
         # Run the simulation for the defined number of steps
-        for step in range(self.n_steps):
-            self.bl_dsmc_step()
+        with tqdm.tqdm(total=self.n_steps) as pbar:
+            for step in range(self.n_steps):
+                pbar.set_description(f"Step {step}")
+                self.dsmc_step()
 
-            # Calculate total translational and rotational energy
-            total_kinetic_energy, total_rotational_energy = self.calculate_total_energy()
-            self.translational_energy_history.append(total_kinetic_energy)
-            self.rotational_energy_history.append(total_rotational_energy)
+                # Calculate total translational and rotational energy
+                total_kinetic_energy, total_rotational_energy = self.calculate_total_energy()
+                self.translational_energy_history.append(total_kinetic_energy)
+                self.rotational_energy_history.append(total_rotational_energy)
 
-            # For quick validation, print the energy at every few steps in test mode
-            if mode == 'test' and step % 100 == 0:
-                print(f"Step {step}: Translational Energy = {total_kinetic_energy}, Rotational Energy = {total_rotational_energy}")
+                # For quick validation, print the energy at every few steps in test mode
+                if mode == 'test' and step % 100 == 0:
+                    print(f"Step {step}: Translational Energy = {total_kinetic_energy}, Rotational Energy = {total_rotational_energy}")
+
+                pbar.update(1)
+
 
         print("Simulation complete.")
 
@@ -159,30 +225,28 @@ class DSMCSimulation:
         plt.legend()
         plt.show()
 
-# Example usage: Run the simulation for both full and test modes
-def main(mode='full'):
-    
-    if mode == 'full': # Full simulation parameters
-        n_steps_full = 1000
-        n_particles_full = 50000
-    
-    elif mode == 'test': # Test simulation parameters
-        n_steps_test = 20000
-        n_particles_test = 1000
-
-    # # Run full simulation
-    # full_simulation = DSMCSimulation(n_particles=n_particles_full, n_steps=n_steps_full)
-    # full_simulation.run_simulation(mode='full')
-    # full_simulation.plot_energy_relaxation(mode='full')
-
-    # Run test simulation for validation
-    test_simulation = DSMCSimulation(n_particles=n_particles_test, n_steps=n_steps_test)
-    test_simulation.run_simulation(mode='test')
-    test_simulation.plot_energy_relaxation(mode='test')
 
 if __name__ == "__main__":
+    # Load the trained MDN model here (assuming TensorFlow model)
     parser = argparse.ArgumentParser(description="DSMC Simulation")
-    parser.add_argument("--mode", type=str, default='full', help="Simulation mode: full or test")
+
+    parser.add_argument("--mdn", type=str, default=None, help="Path to the trained MDN model")
+    parser.add_argument("--n_particles", type=int, default= 50000,  help="Number of particles")
+    parser.add_argument("--n_steps", type=int, default= 1000, help="Number of steps")
+
     args = parser.parse_args()
 
-    main(args.mode)
+    if args.mdn:
+        print("Using MDN model for energy exchange.")
+        use_mdn = True
+        mdn_model = tf.keras.models.load_model(args.mdn, compile=False)
+    else:
+        use_mdn = False
+        mdn_model = None
+
+    
+    dsmc = DSMCSimulation(n_particles=args.n_particles, n_steps=args.n_steps, use_mdn=use_mdn, mdn_model=mdn_model)
+    dsmc.run_simulation()
+    dsmc.plot_energy_relaxation()
+
+
