@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
 
 class DSMCSimulation:
     def __init__(self, n_particles, n_steps, T_tr_initial=380, T_rot_initial=180, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
@@ -159,14 +160,15 @@ class DSMCSimulation:
         plt.show()
 
 # Example usage: Run the simulation for both full and test modes
-def main():
-    # Full simulation parameters
-    n_steps_full = 1000
-    n_particles_full = 50000
+def main(mode='full'):
     
-    # Test simulation parameters
-    n_steps_test = 2000000
-    n_particles_test = 1000
+    if mode == 'full': # Full simulation parameters
+        n_steps_full = 1000
+        n_particles_full = 50000
+    
+    elif mode == 'test': # Test simulation parameters
+        n_steps_test = 20000
+        n_particles_test = 1000
 
     # # Run full simulation
     # full_simulation = DSMCSimulation(n_particles=n_particles_full, n_steps=n_steps_full)
@@ -179,4 +181,8 @@ def main():
     test_simulation.plot_energy_relaxation(mode='test')
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="DSMC Simulation")
+    parser.add_argument("--mode", type=str, default='full', help="Simulation mode: full or test")
+    args = parser.parse_args()
+
+    main(args.mode)
