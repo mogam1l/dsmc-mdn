@@ -1,0 +1,8 @@
+*__pycache__/
+*requirements.txt
+*requirements3.txt
+*/.env
+*/.vscode/
+*/.idea/
+*.h5
+

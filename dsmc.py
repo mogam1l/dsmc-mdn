@@ -1,9 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import tensorflow as tf
 import argparse
-from tensorflow.keras.models import load_model
 import tqdm
+
+import tf_keras
+import tensorflow_probability as tfp
+
+
+tfb = tfp.bijectors
+tfd = tfp.distributions
+tfpl = tfp.layers
+
 
 class DSMCSimulation:
     def __init__(self, n_particles, n_steps, time_step=1e-6, use_mdn=False, mdn_model=None, T_tr_initial=380, T_rot_initial=180, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
@@ -88,15 +95,15 @@ class DSMCSimulation:
         input_data = np.array([[log_Ec, inv_eps_t, inv_eps_r1]])
 
         # Perform prediction
-        predictions = self.mdn_model.predict(input_data)
+        predictions = self.mdn_model.predict(input_data, verbose=0)
 
         # Extract predictions and transform back
-        log_Ecp, inv_eps_tp, inv_eps_r1p = predictions[0]
-        Ec_post = np.exp(log_Ecp)
+        inv_eps_tp, inv_eps_r1p = predictions[0]
+        #Ec_post = np.exp(pre_collisional_energies[0])       #post total is precolissional total
         eps_t_post = self.sigmoid(inv_eps_tp)
         eps_r1_post = self.sigmoid(inv_eps_r1p)
 
-        return Ec_post, eps_t_post, eps_r1_post
+        return eps_t_post, eps_r1_post
 
     def perform_collision(self, idx1, idx2, max_relative_velocity):
         """Handle the collision between two particles."""
@@ -109,25 +116,37 @@ class DSMCSimulation:
 
         # If we use the MDN, we replace the BL energy exchange process
         if self.use_mdn:
-             # Pre-collision energy fractions and total energy
+            # Pre-collision energy fractions and total energy
             Etr_total_pre = kinetic_energy1 + kinetic_energy2
             Er_total_pre = rotational_energy1 + rotational_energy2
+            E_total_pre = Etr_total_pre + Er_total_pre
 
-            eps_t = kinetic_energy1 / (kinetic_energy1 + rotational_energy1)
-            eps_r1 = rotational_energy1 / (rotational_energy1 + rotational_energy2)
+            eps_t = Etr_total_pre / E_total_pre #fraction of total energy in translational energy of BOTH molecules
+            eps_r1 = rotational_energy1 / (rotational_energy1 + rotational_energy2) #Fraction of rotational energy in molecule A
 
             pre_collisional_energies = [
-                np.log(Etr_total_pre),
+                np.log(E_total_pre),
                 self.inv_sigmoid(eps_t),
                 self.inv_sigmoid(eps_r1)
             ]
 
-            Ec_post, eps_t_post, eps_r1_post = self.mdn_energy_exchange(pre_collisional_energies)
+            eps_t_post, eps_r1_post = self.mdn_energy_exchange(pre_collisional_energies)
+            Ec_post = E_total_pre
 
-            kinetic_energy1 = eps_t_post * Ec_post
+            total_postcolission_tr = Ec_post * eps_t_post
+            total_postcolission_r = Ec_post * (1 - eps_t_post)
+
+           
+            # kinetic_energy1 = eps_t_post * Ec_post #Assumed translational energy?
             rotational_energy1 = eps_r1_post * (1 - eps_t_post) * Ec_post
-            kinetic_energy2 = (1 - eps_t_post) * Ec_post - rotational_energy1
+            # kinetic_energy2 = (1 - eps_t_post) * Ec_post - rotational_energy1 #Assumed translational energy?
             rotational_energy2 = (1 - eps_r1_post) * (1 - eps_t_post) * Ec_post
+            
+            
+            kinetic_energy1 = 0.5 * total_postcolission_tr #Assumed translational energy?
+            # rotational_energy1 = total_postcolission_r * eps_r1_post     
+            kinetic_energy2 = 0.5 * total_postcolission_tr #Assumed translational energy?
+              
 
         else:
             # Default to BL model
@@ -240,16 +259,44 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DSMC Simulation")
 
     parser.add_argument("--mdn", type=str, default=None, help="Path to the trained MDN model")
-    parser.add_argument("--n_particles", type=int, default=50000, help="Number of particles")
-    parser.add_argument("--n_steps", type=int, default=1000, help="Number of steps")
+    parser.add_argument("--n_particles", type=int, default=500, help="Number of particles")
+    parser.add_argument("--n_steps", type=int, default=20000, help="Number of steps")
     parser.add_argument("--time_step", type=float, default=1e-6, help="Timestep in seconds")
 
     args = parser.parse_args()
 
-    if args.mdn:
+    if args.mdn: ##--mdn path
         print("Using MDN model for energy exchange.")
         use_mdn = True
-        mdn_model = tf.keras.models.load_model(args.mdn, compile=False)
+        
+        def build_model(NGAUSSIANS, ACTIVATION, NNEURONS):
+            
+            event_shape = [2]
+            num_components = NGAUSSIANS
+            params_size = tfpl.MixtureSameFamily.params_size(num_components,
+                            component_params_size=tfpl.IndependentNormal.params_size(event_shape))
+
+            negloglik = lambda y, p_y: -p_y.log_prob(y)
+
+            model = tf_keras.models.Sequential([
+                tf_keras.layers.Dense(NNEURONS, activation=ACTIVATION),
+                tf_keras.layers.Dense(params_size, activation=None),
+                tfpl.MixtureSameFamily(num_components, tfpl.IndependentNormal(event_shape)),
+            ])
+            
+            model.compile(optimizer=tf_keras.optimizers.Adam(learning_rate = 1e-4), loss=negloglik)
+
+            return model
+
+
+        mdn_model = build_model(20, 'relu', 8) #settings have to match otherwise the loaded weights won't wrork.
+
+        #needed initialization step, probably determines the input size from here.
+        mdn_model(np.ones((3,3)))
+
+        mdn_model.load_weights(args.mdn)
+        mdn_model.summary()
+        
     else:
         use_mdn = False
         mdn_model = None
