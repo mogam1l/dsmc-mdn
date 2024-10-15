@@ -146,7 +146,7 @@ class DSMCSimulation:
             kinetic_energy1 = 0.5 * total_postcolission_tr #Assumed translational energy?
             # rotational_energy1 = total_postcolission_r * eps_r1_post     
             kinetic_energy2 = 0.5 * total_postcolission_tr #Assumed translational energy?
-              
+
 
         else:
             # Default to BL model
@@ -259,8 +259,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DSMC Simulation")
 
     parser.add_argument("--mdn", type=str, default=None, help="Path to the trained MDN model")
-    parser.add_argument("--n_particles", type=int, default=500, help="Number of particles")
-    parser.add_argument("--n_steps", type=int, default=20000, help="Number of steps")
+    parser.add_argument("--n_particles", type=int, default=50000, help="Number of particles")
+    parser.add_argument("--n_steps", type=int, default=1000, help="Number of steps")
     parser.add_argument("--time_step", type=float, default=1e-6, help="Timestep in seconds")
 
     args = parser.parse_args()
