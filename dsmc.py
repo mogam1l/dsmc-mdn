@@ -17,7 +17,7 @@ class DSMCSimulation:
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
-        self.time_step = time_step  # Set timestep (in seconds)
+        self.time_step = 0.2 * (self.domain_size / self.n_cells) / self.v_init   # Set timestep (in seconds)
         self.T_tr_initial = T_tr_initial
         self.T_rot_initial = T_rot_initial
         self.Z_r = Z_r
@@ -25,8 +25,19 @@ class DSMCSimulation:
         self.domain_size = domain_size
         self.n_cells = n_cells
         self.sigma_collision = sigma_collision
+
         self.k_B = 1.38e-23  # Boltzmann constant (J/K)
         self.m_H2 = 3.34e-26  # Mass of hydrogen molecule (kg)
+        self.density = 0.9  # Density of particles (kg/m^3)
+
+        # v_init = np.sqrt(3*boltz*T/mass)
+        self.v_init = np.sqrt(3 * self.k_B * self.T_tr_initial / self.m_H2)  # Initial velocity
+        #tau = 0.2*(L/ncell)/v_init
+        self.tau = 0.2 * (self.domain_size / self.n_cells) / self.v_init  # Collision time
+        # eff_num = density/mass * L**3 /npart
+        self.eff_num = self.density/self.m_H2 * domain_size**3 / n_particles
+        # coeff = 0.5*eff_num*np.pi*diam**2*tau/(L**3/ncell)
+        self.coeff = 0.5 * self.eff_num * np.pi * self.sigma_collision**2 * self.tau / (self.domain_size**3 / self.n_cells)
 
         # Option to use the MDN-based surrogate model
         self.use_mdn = use_mdn
@@ -40,6 +51,7 @@ class DSMCSimulation:
         # Initialize spatial cells
         self.cells = np.zeros((self.n_cells, self.n_cells, self.n_cells), dtype=object)
         self.cell_size = self.domain_size / self.n_cells
+        self.volume_cell = self.cell_size ** 3  # Volume of each cell
         
         # Energy history for plotting
         self.translational_energy_history = []
@@ -109,6 +121,11 @@ class DSMCSimulation:
         """Handle the collision between two particles."""
         velocity1, velocity2 = self.velocities[idx1], self.velocities[idx2]
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
+
+        # Probability of collision based on relative velocity
+        collision_prob = relative_velocity / max_relative_velocity
+        if np.random.rand() > collision_prob:
+            return  # Skip collision if it does not happen based on relative velocity
 
         kinetic_energy1 = self.compute_kinetic_energy(velocity1)
         kinetic_energy2 = self.compute_kinetic_energy(velocity2)
@@ -212,8 +229,14 @@ class DSMCSimulation:
                     # Calculate the maximum relative velocity in the cell
                     max_rel_velocity = self.max_relative_velocity_in_cell(cell_particles)
 
-                    # Perform collisions within the cell
-                    for _ in range(n_cell_particles // 2):
+                    # Calculate number of candidate collision pairs to be selected (based on the original code)
+                    # select = coeff*number*(number-1)*crmax[jcell] 
+                    n_candidate_pairs = int(self.coeff * n_cell_particles * (n_cell_particles - 1) * max_rel_velocity) 
+                    # Print all the parameters for debugging
+                    print(f"Cell ({i}, {j}, {k}): {n_cell_particles} particles, {n_candidate_pairs} candidate pairs, max_rel_velocity = {max_rel_velocity}, coeff = {self.coeff}")
+
+                    # Perform candidate collisions
+                    for _ in range(n_candidate_pairs):
                         idx1, idx2 = np.random.choice(cell_particles, 2, replace=False)
                         self.perform_collision(idx1, idx2, max_rel_velocity)
 
