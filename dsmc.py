@@ -97,8 +97,11 @@ class DSMCSimulation:
         return 1 / (1 + np.exp(-x))
 
     def inv_sigmoid(self, x):
-        """Inverse sigmoid function."""
-        return np.log((x) / (1 - x))
+        """Inverse sigmoid function with clamping to avoid division by zero."""
+        epsilon = 1e-9  # Small value to avoid log(0) or division by zero
+        x = np.clip(x, epsilon, 1 - epsilon)  # Ensure x is within (0, 1)
+        return np.log(x / (1 - x))
+
 
     def mdn_energy_exchange(self, pre_collisional_energies):
         """Use the trained MDN to predict post-collisional energies."""
@@ -121,25 +124,38 @@ class DSMCSimulation:
         """Handle the collision between two particles."""
         velocity1, velocity2 = self.velocities[idx1], self.velocities[idx2]
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
+        CM_velocity = 0.5 * (velocity1 + velocity2)
 
         # Probability of collision based on relative velocity
-        collision_prob = relative_velocity / max_relative_velocity
+        collision_prob = np.linalg.norm(relative_velocity) / max_relative_velocity
         if np.random.rand() > collision_prob:
             return  # Skip collision if it does not happen based on relative velocity
+        
+        if np.random.rand() > self.p_inelastic: # Elastic collision
+            updated_velocity1 = CM_velocity + relative_velocity*0.5
+            updated_velocity2 = CM_velocity - relative_velocity*0.5
 
-        kinetic_energy1 = self.compute_kinetic_energy(velocity1)
-        kinetic_energy2 = self.compute_kinetic_energy(velocity2)
+            self.velocities[idx1] = updated_velocity1
+            self.velocities[idx2] = updated_velocity2
+            return
+
+        # Pre-collision rotational energies
         rotational_energy1, rotational_energy2 = self.rotational_energy[idx1], self.rotational_energy[idx2]
+        # Total energy before collision
+        Etr_total_pre = self.compute_kinetic_energy(relative_velocity)
+        total_rotational_energy = rotational_energy1 + rotational_energy2
+        E_total_pre = Etr_total_pre + total_rotational_energy
+        
+        
+        E_tr_post = Etr_total_pre # Placeholder for post-collisional translational energy
+        
 
         # If we use the MDN, we replace the BL energy exchange process
         if self.use_mdn:
             # Pre-collision energy fractions and total energy
-            Etr_total_pre = kinetic_energy1 + kinetic_energy2
-            Er_total_pre = rotational_energy1 + rotational_energy2
-            E_total_pre = Etr_total_pre + Er_total_pre
 
             eps_t = Etr_total_pre / E_total_pre #fraction of total energy in translational energy of BOTH molecules
-            eps_r1 = rotational_energy1 / (rotational_energy1 + rotational_energy2) #Fraction of rotational energy in molecule A
+            eps_r1 = rotational_energy1 / total_rotational_energy #Fraction of rotational energy in molecule A
 
             pre_collisional_energies = [
                 np.log(E_total_pre),
@@ -147,53 +163,55 @@ class DSMCSimulation:
                 self.inv_sigmoid(eps_r1)
             ]
 
-            eps_t_post, eps_r1_post = self.mdn_energy_exchange(pre_collisional_energies)
-            Ec_post = E_total_pre
+            eps_t_post, eps_r1_post = self.mdn_energy_exchange(pre_collisional_energies) # Predict post-collisional energies
 
-            total_postcolission_tr = Ec_post * eps_t_post
-            total_postcolission_r = Ec_post * (1 - eps_t_post)
+            total_postcolission_tr = E_total_pre * eps_t_post #total translational energy after collision
 
-           
-            # kinetic_energy1 = eps_t_post * Ec_post #Assumed translational energy?
-            rotational_energy1 = eps_r1_post * (1 - eps_t_post) * Ec_post
-            # kinetic_energy2 = (1 - eps_t_post) * Ec_post - rotational_energy1 #Assumed translational energy?
-            rotational_energy2 = (1 - eps_r1_post) * (1 - eps_t_post) * Ec_post
+            Er_post = (1 - eps_t_post) * E_total_pre #total rotational energy after collision
+
+            rotational_energy1 = eps_r1_post * Er_post #rotational energy of molecule 1 after collision
+            rotational_energy2 = (1 - eps_r1_post) * Er_post   #rotational energy of molecule 2 after collision     
             
-            
-            kinetic_energy1 = 0.5 * total_postcolission_tr #Assumed translational energy?
-            # rotational_energy1 = total_postcolission_r * eps_r1_post     
-            kinetic_energy2 = 0.5 * total_postcolission_tr #Assumed translational energy?
+            E_tr_post = total_postcolission_tr    #kinetic energy of both molecules after collision
 
 
         else:
             # Default to BL model
             if np.random.rand() < self.p_inelastic:
-                kinetic_energy1, rotational_energy1 = self.borgnakke_larsen_collision(kinetic_energy1, rotational_energy1)
-                kinetic_energy2, rotational_energy2 = self.borgnakke_larsen_collision(kinetic_energy2, rotational_energy2)
+                total_kinetic_energy, total_rotational_energy = self.borgnakke_larsen_collision(Etr_total_pre, rotational_energy1 + rotational_energy2)
+
+                E_tr_post = total_kinetic_energy
+
+                rotational_energy1 = rotational_energy2 = 0.5 * total_rotational_energy
+
 
         # Update the rotational energy
-        self.rotational_energy[idx1] = rotational_energy1
+        self.rotational_energy[idx1] = rotational_energy1 
         self.rotational_energy[idx2] = rotational_energy2
 
-        # Rescale the velocities based on the new kinetic energy
-        self.velocities[idx1] *= np.sqrt(kinetic_energy1 / self.compute_kinetic_energy(velocity1))
-        self.velocities[idx2] *= np.sqrt(kinetic_energy2 / self.compute_kinetic_energy(velocity2))
+
+        self.velocities[idx1] = CM_velocity + np.sqrt(E_tr_post / self.m_H2) 
+        self.velocities[idx2] = CM_velocity - np.sqrt(E_tr_post / self.m_H2)
 
     def max_relative_velocity_in_cell(self, particles_in_cell):
-        """Calculate the maximum relative velocity among all pairs in a cell."""
+        """Calculate the maximum relative velocity (magnitude) among all pairs in a cell."""
         max_rel_velocity = 0
         for i in range(len(particles_in_cell)):
             for j in range(i + 1, len(particles_in_cell)):
                 idx1, idx2 = particles_in_cell[i], particles_in_cell[j]
                 rel_velocity = self.calculate_relative_velocity(self.velocities[idx1], self.velocities[idx2])
-                if rel_velocity > max_rel_velocity:
-                    max_rel_velocity = rel_velocity
+
+                # Compare the magnitude (norm) of the relative velocity vectors
+                rel_velocity_magnitude = np.linalg.norm(rel_velocity)
+                if rel_velocity_magnitude > max_rel_velocity:
+                    max_rel_velocity = rel_velocity_magnitude
+
         return max_rel_velocity
 
     def calculate_relative_velocity(self, vel1, vel2):
         """Calculate the relative velocity between two particles."""
         relative_velocity = vel1 - vel2
-        return np.linalg.norm(relative_velocity)
+        return relative_velocity
 
     def calculate_total_energy(self):
         """Calculate the total translational and rotational energy in the system."""
