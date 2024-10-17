@@ -17,7 +17,6 @@ class DSMCSimulation:
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
-        self.time_step = 0.2 * (self.domain_size / self.n_cells) / self.v_init   # Set timestep (in seconds)
         self.T_tr_initial = T_tr_initial
         self.T_rot_initial = T_rot_initial
         self.Z_r = Z_r
@@ -26,6 +25,7 @@ class DSMCSimulation:
         self.n_cells = n_cells
         self.sigma_collision = sigma_collision
 
+
         self.k_B = 1.38e-23  # Boltzmann constant (J/K)
         self.m_H2 = 3.34e-26  # Mass of hydrogen molecule (kg)
         self.density = 0.9  # Density of particles (kg/m^3)
@@ -33,11 +33,11 @@ class DSMCSimulation:
         # v_init = np.sqrt(3*boltz*T/mass)
         self.v_init = np.sqrt(3 * self.k_B * self.T_tr_initial / self.m_H2)  # Initial velocity
         #tau = 0.2*(L/ncell)/v_init
-        self.tau = 0.2 * (self.domain_size / self.n_cells) / self.v_init  # Collision time
+        self.time_step = 0.2 * (self.domain_size / self.n_cells) / self.v_init   # Set timestep (in seconds)
         # eff_num = density/mass * L**3 /npart
         self.eff_num = self.density/self.m_H2 * domain_size**3 / n_particles
         # coeff = 0.5*eff_num*np.pi*diam**2*tau/(L**3/ncell)
-        self.coeff = 0.5 * self.eff_num * np.pi * self.sigma_collision**2 * self.tau / (self.domain_size**3 / self.n_cells)
+        self.coeff = 0.5 * self.eff_num * np.pi * self.sigma_collision**2 * self.time_step / (self.domain_size**3 / self.n_cells)
 
         # Option to use the MDN-based surrogate model
         self.use_mdn = use_mdn
@@ -233,7 +233,6 @@ class DSMCSimulation:
                     # select = coeff*number*(number-1)*crmax[jcell] 
                     n_candidate_pairs = int(self.coeff * n_cell_particles * (n_cell_particles - 1) * max_rel_velocity) 
                     # Print all the parameters for debugging
-                    print(f"Cell ({i}, {j}, {k}): {n_cell_particles} particles, {n_candidate_pairs} candidate pairs, max_rel_velocity = {max_rel_velocity}, coeff = {self.coeff}")
 
                     # Perform candidate collisions
                     for _ in range(n_candidate_pairs):
