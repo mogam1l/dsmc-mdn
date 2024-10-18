@@ -118,7 +118,7 @@ class DSMCSimulation:
 
         return eps_t_post, eps_r1_post
     
-    def perform_collision(self, idx1, idx2, max_rel_velocity):
+    def perform_collision(self, idx1, idx2 , max_rel_velocity):
         """Handle the collision between two particles using the regular Larsen-Borgnakke model."""
         velocity1, velocity2 = self.velocities[idx1], self.velocities[idx2]
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
@@ -147,7 +147,7 @@ class DSMCSimulation:
             self.inelastic_collisions += 1
 
             # Total energy before collision
-            E_trans_pre = 0.5 * self.m_H2 * np.sum((velocity1 - CM_velocity)**2 + (velocity2 - CM_velocity)**2)
+            E_trans_pre = 0.5 * self.m_H2 * np.sum((velocity1 - CM_velocity) ** 2 + (velocity2 - CM_velocity) ** 2)
             E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
             E_total_pre = E_trans_pre + E_rot_pre
 
@@ -159,23 +159,23 @@ class DSMCSimulation:
             energy_fraction_trans = np.random.beta(dof_trans / 2, dof_rot / 2)
             E_trans_post = E_total_pre * energy_fraction_trans
             E_rot_post = E_total_pre - E_trans_post
-            E_total_post = E_trans_post + E_rot_post
 
             # Distribute rotational energy equally between the two molecules
             self.rotational_energy[idx1] = E_rot_post / 2
             self.rotational_energy[idx2] = E_rot_post / 2
 
-            # Update velocities based on new translational energy
-            # Randomize the relative velocity direction
-            relative_speed = np.sqrt(2 * E_trans_post / self.m_H2)
-
-            # Get the true relative velocity with the new magnitude
+            # Correct calculation of relative speed
+            relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
             new_relative_velocity = self.random_unit_vector() * relative_speed
-            print(new_relative_velocity)
+
             # Update velocities
             self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
             self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
 
+            # Energy conservation check
+            E_trans_post_check = 0.5 * self.m_H2 * np.sum((self.velocities[idx1] - CM_velocity) ** 2 + (self.velocities[idx2] - CM_velocity) ** 2)
+            E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+            E_total_post = E_trans_post_check + E_rot_post_check
 
             assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
 
