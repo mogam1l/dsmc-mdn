@@ -306,6 +306,33 @@ class DSMCSimulation:
         plt.legend()
         plt.show()
 
+    def plot_temperature_relaxation(self):
+        """Plot the temperature relaxation over time."""
+        # Degrees of freedom
+        dof_trans = 3
+        dof_rot = 2
+        k_B = self.k_B
+        N = self.n_particles
+
+        # Time axis
+        time_steps = np.arange(self.n_steps) * self.time_step
+
+        # Convert energies to temperatures
+        T_trans = np.array(self.translational_energy_history) / (0.5 * N * k_B * dof_trans)
+        T_rot = np.array(self.rotational_energy_history) / (0.5 * N * k_B * dof_rot)
+        T_total = np.array(self.total_energy_history) / (0.5 * N * k_B * (dof_trans + dof_rot))
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(time_steps, T_trans, label="Translational Temperature", color='b')
+        plt.plot(time_steps, T_rot, label="Rotational Temperature", color='r')
+        plt.plot(time_steps, T_total, label="Total Temperature", color='k')
+        plt.title("Temperature Relaxation in DSMC Simulation")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Temperature (K)")
+        plt.legend()
+        plt.show()
+
+
 
 if __name__ == "__main__":
     # Load the trained MDN model here (assuming TensorFlow model)
@@ -360,4 +387,5 @@ if __name__ == "__main__":
     print(f"Total inelastic collisions: {dsmc.inelastic_collisions}")
     print(f"Total rejected collisions percentage: {dsmc.rejected_collisions/ (dsmc.elastic_collisions + dsmc.inelastic_collisions + dsmc.rejected_collisions) * 100}%")
     dsmc.plot_energy_relaxation()
+    dsmc.plot_temperature_relaxation()
     dsmc.plot_positions()
