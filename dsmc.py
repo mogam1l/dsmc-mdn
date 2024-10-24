@@ -11,16 +11,18 @@ tfb = tfp.bijectors
 tfd = tfp.distributions
 tfpl = tfp.layers
 
+np.random.seed(1)
+
 
 class DSMCSimulation:
-    def __init__(self, n_particles, n_steps, time_step=1e-6, use_mdn=False, mdn_model=None, T_tr_initial=380, T_rot_initial=180, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
+    def __init__(self, n_particles, n_steps, time_step=1e-6, use_mdn=False, mdn_model=None, T_tr_initial=167, T_rot_initial=1000, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
         self.T_tr_initial = T_tr_initial
         self.T_rot_initial = T_rot_initial
         self.Z_r = Z_r
-        self.p_inelastic = 1 - (1/self.Z_r)  # Inelastic collision probability
+        self.p_inelastic = 1/self.Z_r  # Inelastic collision probability
         self.domain_size = domain_size
         self.n_cells = n_cells
         self.sigma_collision = sigma_collision
@@ -29,6 +31,11 @@ class DSMCSimulation:
         self.k_B = 1.38e-23  # Boltzmann constant (J/K)
         self.m_H2 = 3.34e-26  # Mass of hydrogen molecule (kg)
         self.density = 0.9  # Density of particles (kg/m^3)
+        self.omega = 0.5  # Collision model parameter
+        
+        # Degrees of freedom
+        self.dof_trans = 3  # 3 translational degrees of freedom
+        self.dof_rot = 2    # 2 rotational degrees of freedom for diatomic molecules
 
         # v_init = np.sqrt(3*boltz*T/mass)
         self.v_init = np.sqrt(3 * self.k_B * self.T_tr_initial / self.m_H2)  # Initial velocity
@@ -46,7 +53,7 @@ class DSMCSimulation:
         # Initialize arrays for positions, velocities, and energies
         self.positions = self.initialize_positions()
         self.velocities = self.initialize_velocities(self.T_tr_initial)
-        self.rotational_energy = 0.5 * self.k_B * self.T_rot_initial * np.ones(self.n_particles)
+        self.rotational_energy = -np.log(np.random.rand(self.n_particles)) * self.k_B * self.T_rot_initial
         
         # Initialize spatial cells
         self.cells = np.zeros((self.n_cells, self.n_cells, self.n_cells), dtype=object)
@@ -64,7 +71,7 @@ class DSMCSimulation:
 
     def initialize_velocities(self, T):
         """Initialize velocities based on Maxwell-Boltzmann distribution."""
-        return np.random.normal(0, np.sqrt(self.k_B * T / self.m_H2), (self.n_particles, 3))
+        return np.sqrt(2 * self.k_B * T / self.m_H2) * np.sin(2 * np.pi * np.random.rand(self.n_particles, 3)) * np.sqrt(-np.log(np.random.rand(self.n_particles, 3)))
 
     def initialize_positions(self):
         """Initialize positions of particles randomly in the domain."""
@@ -123,6 +130,7 @@ class DSMCSimulation:
         velocity1, velocity2 = self.velocities[idx1], self.velocities[idx2]
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
         CM_velocity = 0.5 * (velocity1 + velocity2)
+        b_parameter = self.compute_b_parameter(idx1,idx2)
 
         # Compute collision probability using fixed v_rel_max
         collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
@@ -147,22 +155,31 @@ class DSMCSimulation:
             self.inelastic_collisions += 1
 
             # Total energy before collision
-            E_trans_pre = 0.5 * self.m_H2 * np.sum((velocity1 - CM_velocity) ** 2 + (velocity2 - CM_velocity) ** 2)
+            E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
             E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
             E_total_pre = E_trans_pre + E_rot_pre
 
-            # Degrees of freedom
-            dof_trans = 3  # 3 translational degrees of freedom
-            dof_rot = 2    # 2 rotational degrees of freedom for diatomic molecules
-
-            # Redistribute total energy among translational and rotational modes using the beta distribution
-            energy_fraction_trans = np.random.beta(dof_trans / 2, dof_rot / 2)
-            E_trans_post = E_total_pre * energy_fraction_trans
-            E_rot_post = E_total_pre - E_trans_post
+            # Redistribute total energy among translational and rotational modes
+            energy_fraction_trans = np.random.rand()
+            E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
+            if E_tr_probability < np.random.rand():
+                energy_fraction_trans = np.random.rand()
+                E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
+                return
+            else:
+                E_trans_post = E_total_pre * energy_fraction_trans
+                E_rot_post = E_total_pre - E_trans_post
 
             # Distribute rotational energy equally between the two molecules
-            self.rotational_energy[idx1] = E_rot_post / 2
-            self.rotational_energy[idx2] = E_rot_post / 2
+            energy_fraction_rot1 = np.random.rand()
+            E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
+            if E_rot1_probability < np.random.rand():
+                energy_fraction_rot1 = np.random.rand()
+                E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
+                return
+            else:
+                self.rotational_energy[idx1] = E_rot_post * energy_fraction_rot1
+                self.rotational_energy[idx2] = E_rot_post - self.rotational_energy[idx1]
 
             # Correct calculation of relative speed
             relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
@@ -173,7 +190,7 @@ class DSMCSimulation:
             self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
 
             # Energy conservation check
-            E_trans_post_check = 0.5 * self.m_H2 * np.sum((self.velocities[idx1] - CM_velocity) ** 2 + (self.velocities[idx2] - CM_velocity) ** 2)
+            E_trans_post_check = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
             E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
             E_total_post = E_trans_post_check + E_rot_post_check
 
@@ -183,7 +200,7 @@ class DSMCSimulation:
 
     def random_unit_vector(self):
         """Generate a random unit vector uniformly distributed over the sphere."""
-        theta = np.arccos(1 - 2 * np.random.rand())
+        theta = np.pi * np.random.rand()
         phi = 2 * np.pi * np.random.rand()
         x = np.sin(theta) * np.cos(phi)
         y = np.sin(theta) * np.sin(phi)
@@ -223,6 +240,14 @@ class DSMCSimulation:
         
         # Apply periodic boundary conditions
         self.positions = np.mod(self.positions, self.domain_size) # PERIODIC BOUNDARY CONDITIONS
+        
+    def compute_b_parameter(self, id1, id2):
+        """Compute b parameter based on the direction of the relative velocity vector and the particle positions"""
+        time_of_collision = (self.positions[id1] - self.positions[id2])/(self.velocities[id1] - self.velocities[id2])
+        pos1 = self.positions[id1] + self.velocities[id1] * time_of_collision
+        pos2 = self.positions[id2] + self.velocities[id2] * time_of_collision
+        b_parameter = np.linalg.norm(pos1 - pos2)
+        return b_parameter
 
     def plot_positions(self):
         """Plot the positions of particles in 3D."""
@@ -302,36 +327,25 @@ class DSMCSimulation:
         plt.plot(self.total_energy_history, label="Total Energy", color='k')
         plt.title(f"Energy Relaxation in DSMC ({mode} mode)")
         plt.xlabel("Time Step")
-        plt.ylabel("Energy (J)")
+        plt.ylabel("Energy (K)")
         plt.legend()
         plt.show()
-
-    def plot_temperature_relaxation(self):
-        """Plot the temperature relaxation over time."""
-        # Degrees of freedom
-        dof_trans = 3
-        dof_rot = 2
-        k_B = self.k_B
-        N = self.n_particles
-
-        # Time axis
-        time_steps = np.arange(self.n_steps) * self.time_step
-
-        # Convert energies to temperatures
-        T_trans = np.array(self.translational_energy_history) / (0.5 * N * k_B * dof_trans)
-        T_rot = np.array(self.rotational_energy_history) / (0.5 * N * k_B * dof_rot)
-        T_total = np.array(self.total_energy_history) / (0.5 * N * k_B * (dof_trans + dof_rot))
-
+        
+    def plot_energy_relaxation_T(self, mode='full'):
+        self.T_tr = np.array(self.translational_energy_history) / (0.5 * self.dof_trans * self.n_particles * self.k_B)
+        self.T_rot = np.array(self.rotational_energy_history) / (0.5 * self.dof_rot * self.n_particles * self.k_B)
+        self.T_total = np.array(self.total_energy_history) / (0.5 * (self.dof_trans + self.dof_rot) * self.n_particles * self.k_B)
+        
+        """Plot the energy relaxation over time."""
         plt.figure(figsize=(10, 6))
-        plt.plot(time_steps, T_trans, label="Translational Temperature", color='b')
-        plt.plot(time_steps, T_rot, label="Rotational Temperature", color='r')
-        plt.plot(time_steps, T_total, label="Total Temperature", color='k')
-        plt.title("Temperature Relaxation in DSMC Simulation")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Temperature (K)")
+        plt.plot(self.T_tr, label="Translational Temperature", color='b')
+        plt.plot(self.T_rot, label="Rotational Temperature", color='r')
+        plt.plot(self.T_total, label="System Temperature", color='k')
+        plt.title(f"Energy Relaxation in DSMC ({mode} mode)")
+        plt.xlabel("Time Step")
+        plt.ylabel("Energy (K)")
         plt.legend()
         plt.show()
-
 
 
 if __name__ == "__main__":
@@ -339,8 +353,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DSMC Simulation")
 
     parser.add_argument("--mdn", type=str, default=None, help="Path to the trained MDN model")
-    parser.add_argument("--n_particles", type=int, default=50000, help="Number of particles")
-    parser.add_argument("--n_steps", type=int, default=1000, help="Number of steps")
+    parser.add_argument("--n_particles", type=int, default=10000, help="Number of particles")
+    parser.add_argument("--n_steps", type=int, default=2000, help="Number of steps")
     parser.add_argument("--time_step", type=float, default=1e-6, help="Timestep in seconds")
 
     args = parser.parse_args()
@@ -386,6 +400,6 @@ if __name__ == "__main__":
     print(f"Total elastic collisions: {dsmc.elastic_collisions}")
     print(f"Total inelastic collisions: {dsmc.inelastic_collisions}")
     print(f"Total rejected collisions percentage: {dsmc.rejected_collisions/ (dsmc.elastic_collisions + dsmc.inelastic_collisions + dsmc.rejected_collisions) * 100}%")
+    dsmc.plot_energy_relaxation_T()
     dsmc.plot_energy_relaxation()
-    dsmc.plot_temperature_relaxation()
     dsmc.plot_positions()
