@@ -277,6 +277,10 @@ sampData = {'ncell': ncell,
             'ave_T': np.zeros(ncell)}
 tsamp = 0  # Total sampling time
 
+# Initialize arrays to store energies over time
+total_translational_energy = []
+total_rotational_energy = []
+
 # Loop for the desired number of time steps
 colSum = 0
 nstep = int(input('Enter total number of timesteps: '))
@@ -291,6 +295,14 @@ for istep in range(nstep):
     # Evaluate collisions among the particles
     v, vrmax, selxtra, col = colider(v, vrmax, z_eff, selxtra, coeff, sortData, rot_energy, omega, mass)
     colSum += col
+
+    # Calculate and store the total translational energy at this time step
+    E_translational = 0.5 * mass * np.sum(np.linalg.norm(v, axis=1)**2)
+    total_translational_energy.append(E_translational)
+
+    # Calculate and store the total rotational energy at this time step
+    E_rotational = np.sum(rot_energy)
+    total_rotational_energy.append(E_rotational)
 
     # After initial transient, accumulate statistical samples
     if istep > nstep / 10:
@@ -308,6 +320,18 @@ ave_u = sampData['ave_u'] / nsamp
 ave_T_trans = (mass / (3 * boltz) * (sampData['ave_T'] / nsamp))
 ave_T_rot = (1 / boltz) * (sampData['ave_rot'] / nsamp)
 ave_T = (3 * ave_T_trans + 2 * ave_T_rot) / 5
+# Plot the total translational and rotational energies over time
+timesteps = np.arange(nstep)
+
+
+plt.figure()
+plt.plot(timesteps, total_translational_energy, label='Translational Energy')
+plt.plot(timesteps, total_rotational_energy, label='Rotational Energy')
+plt.xlabel('Time Step')
+plt.ylabel('Energy (Joules)')
+plt.legend()
+plt.title('Total Translational and Rotational Energies Over Time')
+plt.show()
 
 xcell = (((np.arange(1, ncell + 1)) - 0.5) / ncell) * L
 
