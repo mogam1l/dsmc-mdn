@@ -5,6 +5,7 @@ import tqdm
 from scipy.special import expit, logit, softmax
 from scipy.stats import norm
 import os
+import csv
 
 import tf_keras
 import tensorflow_probability as tfp
@@ -80,7 +81,25 @@ class DSMCSimulation:
         self.elastic_collisions = 0
         self.inelastic_collisions = 0
         self.rejected_collisions = 0
+        self.current_step = 0
+
+        self.initialize_logger()
         
+    def initialize_logger(self):
+        """Initialize the collision logger."""
+        if self.use_mdn:
+            model_type = "MDN"
+        else:
+            model_type = "BL"
+        # name file according to dsmc parameters
+        self.log_file = open(f"dsmc_{model_type}_N:{self.n_particles}_steps:{self.n_steps}_Ttr:{self.T_tr_initial}_Trot:{self.T_rot_initial}_Zr:{self.Z_r}_domain:{self.domain_size}_cells{self.n_cells}_sigma{self.sigma_collision}.csv", 'w', newline='')
+        self.log_writer = csv.writer(self.log_file)
+        # Write headers
+        self.log_writer.writerow(['time_step','collision_type', 'b_parameter', 'E_total_pre', 'E_total_post', 'E_trans_pre', 'E_trans_post', 'E_rot_pre', 'E_rot_post'])
+
+    def close_logger(self):
+        """Close the collision logger file."""
+        self.log_file.close()
 
     def initialize_velocities(self, T):
         """Initialize velocities based on Maxwell-Boltzmann distribution."""
@@ -219,6 +238,8 @@ class DSMCSimulation:
         E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
         E_total_post = E_trans_post_check + E_rot_post_check
 
+        self.log_writer.writerow([self.current_step*self.time_step, "inelastic", self.b_parameter, E_total_pre, E_total_post, self.E_trans_pre, E_trans_post, self.E_rot_pre, E_rot_post])
+
         assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
     
     def perform_collision(self, idx1, idx2 , max_rel_velocity):
@@ -226,7 +247,13 @@ class DSMCSimulation:
         velocity1, velocity2 = self.velocities[idx1], self.velocities[idx2]
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
         CM_velocity = 0.5 * (velocity1 + velocity2)
-        b_parameter = self.compute_b_parameter(idx1,idx2)
+        self.b_parameter = self.compute_b_parameter(idx1,idx2)
+        # Total energy before collision
+
+        self.E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
+        self.E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+        self.E_total_pre = self.E_trans_pre + self.E_rot_pre
+
 
         # Compute collision probability using fixed v_rel_max
         collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
@@ -245,15 +272,17 @@ class DSMCSimulation:
             # Update velocities
             self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
             self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
+
+            E_trans_post = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
+            E_rot_post = self.E_rot_pre
+            E_total_post = E_trans_post + E_rot_post
+
+            #  self.log_writer.writerow(['time_step','collision_type', 'b_parameter', 'E_total_pre', 'E_total_post', 'E_trans_pre', 'E_trans_post', 'E_rot_pre', 'E_rot_post'])
+            self.log_writer.writerow([self.current_step*self.time_step, "elastic", self.b_parameter, self.E_total_pre, E_total_post, self.E_trans_pre, E_trans_post, self.E_rot_pre, E_rot_post])
             return
         
         if self.use_mdn == False:  # Inelastic collision using regular Larsen-Borgnakke model
             self.inelastic_collisions += 1
-
-            # Total energy before collision
-            E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
-            E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-            E_total_pre = E_trans_pre + E_rot_pre
 
             # Redistribute total energy among translational and rotational modes
             energy_fraction_trans = np.random.rand()
@@ -270,24 +299,19 @@ class DSMCSimulation:
                 E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
 
             #  update_energy_and_velocity(self, idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity):
-            self.update_energy_and_velocity(idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity)
+            self.update_energy_and_velocity(idx1, idx2, self.E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity)
 
             
         elif self.use_mdn == True: # Inelastic collision using MDN-based surrogate model
             self.inelastic_collisions += 1
-
-            # Total energy before collision
-            E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
-            E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-            E_total_pre = E_trans_pre + E_rot_pre
             
-            eps_t_pre = E_trans_pre / E_total_pre
-            eps_r1_pre = self.rotational_energy[idx1] / E_rot_pre
+            eps_t_pre = self.E_trans_pre /self. E_total_pre
+            eps_r1_pre = self.rotational_energy[idx1] / self.E_rot_pre
             
-            energy_fraction_trans, energy_fraction_rot1 = self.mdn_energy_exchange_new(E_total_pre, eps_t_pre, eps_r1_pre)
+            energy_fraction_trans, energy_fraction_rot1 = self.mdn_energy_exchange_new(self.E_total_pre, eps_t_pre, eps_r1_pre)
             
             #  update_energy_and_velocity(self, idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity):
-            self.update_energy_and_velocity(idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity)
+            self.update_energy_and_velocity(idx1, idx2, self.E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity)
                 
 
 
@@ -355,6 +379,9 @@ class DSMCSimulation:
 
     def dsmc_step(self):
         """Perform one step of BL-DSMC simulation, including particle collisions within cells and updating positions."""
+        self.current_step += 1
+
+
         # Update particle positions based on velocities and timestep
         self.update_positions()
 
@@ -411,6 +438,7 @@ class DSMCSimulation:
                 pbar.update(1)
 
         print("Simulation complete.")
+        self.close_logger()
 
     def plot_energy_relaxation(self, mode='full'):
         """Plot the energy relaxation over time."""
