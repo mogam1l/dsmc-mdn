@@ -9,6 +9,7 @@ import csv
 
 import tf_keras
 import tensorflow_probability as tfp
+from datetime import datetime
 
 
 tfb = tfp.bijectors
@@ -19,7 +20,7 @@ np.random.seed(1)
 
 
 class DSMCSimulation:
-    def __init__(self, n_particles, n_steps, time_step=1e-6, mdn_model=None, T_tr_initial=167, T_rot_initial=1000, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
+    def __init__(self, n_particles, n_steps, mdn_model=None, T_tr_initial=167, T_rot_initial=1000, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
@@ -91,11 +92,19 @@ class DSMCSimulation:
             model_type = "MDN"
         else:
             model_type = "BL"
-        # name file according to dsmc parameters
-        self.log_file = open(f"dsmc_{model_type}_N:{self.n_particles}_steps:{self.n_steps}_Ttr:{self.T_tr_initial}_Trot:{self.T_rot_initial}_Zr:{self.Z_r}_domain:{self.domain_size}_cells{self.n_cells}_sigma{self.sigma_collision}.csv", 'w', newline='')
+        
+        # Name the folder according to DSMC parameters
+        self.folder_name = f"logs/dsmc_{model_type}_N:{self.n_particles}_steps:{self.n_steps}_Ttr:{self.T_tr_initial}_Trot:{self.T_rot_initial}_Zr:{self.Z_r}_domain:{self.domain_size}_cells{self.n_cells}_sigma{self.sigma_collision}"
+        
+        # Ensure that the directory exists
+        os.makedirs(self.folder_name, exist_ok=True)
+        
+        # Open the log file for writing
+        self.log_file = open(self.folder_name + "/simulation_data_"  + datetime.now().strftime("%d_%m_%Y-%H:%M:%S") + ".csv" , 'w', newline='')
         self.log_writer = csv.writer(self.log_file)
+        
         # Write headers
-        self.log_writer.writerow(['time_step','collision_type', 'b_parameter', 'E_total_pre', 'E_total_post', 'E_trans_pre', 'E_trans_post', 'E_rot_pre', 'E_rot_post'])
+        self.log_writer.writerow(['time_step', 'collision_type', 'b_parameter', 'E_tr_pre', 'E_tr_post', 'E_rotA_pre', 'E_rotA_post', 'E_rotB_pre', 'E_rotB_post'])
 
     def close_logger(self):
         """Close the collision logger file."""
@@ -181,7 +190,8 @@ class DSMCSimulation:
             sigma_eps_rP[:, i] = output_OL[:, (self.Ngauss + 3) + (i * 4)]
         
         # Softmax for weights #to keep them positive
-        weights = softmax(weights)
+        for i in range(N):
+            weights[i,:] = softmax(weights[i,:])
     
         # Softplus for standard deviations#This seems hacky, does TF do this?
         sigma_eps_t = self.softplus(sigma_eps_t)  # Softplus
@@ -238,9 +248,10 @@ class DSMCSimulation:
         E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
         E_total_post = E_trans_post_check + E_rot_post_check
 
-        self.log_writer.writerow([self.current_step*self.time_step, "inelastic", self.b_parameter, E_total_pre, E_total_post, self.E_trans_pre, E_trans_post, self.E_rot_pre, E_rot_post])
-
         assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
+
+        # self.log_writer.writerow(['time_step', 'collision_type', 'b_parameter', 'E_tr_pre', 'E_tr_post', 'E_rotA_pre', 'E_rotA_post', 'E_rotB_pre', 'E_rotB_post'])
+        self.log_writer.writerow([self.current_step*self.time_step, "inelastic", self.b_parameter, self.E_trans_pre, E_trans_post, self.E_rot_pre_idx1, self.rotational_energy[idx1], self.E_rot_pre_idx2, self.rotational_energy[idx2]])
     
     def perform_collision(self, idx1, idx2 , max_rel_velocity):
         """Handle the collision between two particles using the regular Larsen-Borgnakke model."""
@@ -251,7 +262,9 @@ class DSMCSimulation:
         # Total energy before collision
 
         self.E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
-        self.E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+        self.E_rot_pre_idx1 = self.rotational_energy[idx1].copy()
+        self.E_rot_pre_idx2 = self.rotational_energy[idx2].copy()
+        self.E_rot_pre = self.E_rot_pre_idx1 + self.E_rot_pre_idx2
         self.E_total_pre = self.E_trans_pre + self.E_rot_pre
 
 
@@ -274,11 +287,9 @@ class DSMCSimulation:
             self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
 
             E_trans_post = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
-            E_rot_post = self.E_rot_pre
-            E_total_post = E_trans_post + E_rot_post
 
-            #  self.log_writer.writerow(['time_step','collision_type', 'b_parameter', 'E_total_pre', 'E_total_post', 'E_trans_pre', 'E_trans_post', 'E_rot_pre', 'E_rot_post'])
-            self.log_writer.writerow([self.current_step*self.time_step, "elastic", self.b_parameter, self.E_total_pre, E_total_post, self.E_trans_pre, E_trans_post, self.E_rot_pre, E_rot_post])
+            #  self.log_writer.writerow(['time_step', 'collision_type', 'b_parameter', 'E_tr_pre', 'E_tr_post', 'E_rotA_pre', 'E_rotA_post', 'E_rotB_pre', 'E_rotB_post'])
+            self.log_writer.writerow([self.current_step*self.time_step, "elastic", self.b_parameter, self.E_trans_pre, E_trans_post, self.E_rot_pre_idx1, self.E_rot_pre_idx1, self.E_rot_pre_idx2, self.E_rot_pre_idx2])
             return
         
         if self.use_mdn == False:  # Inelastic collision using regular Larsen-Borgnakke model
@@ -375,7 +386,7 @@ class DSMCSimulation:
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
         ax.set_title("Particle Positions")
-        plt.show()
+        plt.savefig(self.folder_name + "/particle_positions.png")
 
     def dsmc_step(self):
         """Perform one step of BL-DSMC simulation, including particle collisions within cells and updating positions."""
@@ -440,17 +451,6 @@ class DSMCSimulation:
         print("Simulation complete.")
         self.close_logger()
 
-    def plot_energy_relaxation(self, mode='full'):
-        """Plot the energy relaxation over time."""
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.translational_energy_history, label="Translational Energy", color='b')
-        plt.plot(self.rotational_energy_history, label="Rotational Energy", color='r')
-        plt.plot(self.total_energy_history, label="Total Energy", color='k')
-        plt.title(f"Energy Relaxation in DSMC ({mode} mode)")
-        plt.xlabel("Time Step")
-        plt.ylabel("Energy (K)")
-        plt.legend()
-        plt.show()
         
     def plot_energy_relaxation_T(self, mode='full'):
         self.T_tr = np.array(self.translational_energy_history) / (0.5 * self.dof_trans * self.n_particles * self.k_B)
@@ -465,8 +465,7 @@ class DSMCSimulation:
         plt.title(f"Energy Relaxation in DSMC ({mode} mode)")
         plt.xlabel("Time Step")
         plt.ylabel("Energy (K)")
-        plt.legend()
-        plt.show()
+        plt.savefig(self.folder_name + "/energy_relaxation.png")
 
 
 if __name__ == "__main__":
@@ -476,7 +475,6 @@ if __name__ == "__main__":
     parser.add_argument("--mdn_model", type=str, default=None, help="Path to the trained MDN model")
     parser.add_argument("--n_particles", type=int, default=5000, help="Number of particles")
     parser.add_argument("--n_steps", type=int, default=1000, help="Number of steps")
-    parser.add_argument("--time_step", type=float, default=1e-6, help="Timestep in seconds")
 
     args = parser.parse_args()
 
@@ -519,16 +517,12 @@ if __name__ == "__main__":
         mdn_model.load_weights(args.mdn_model)
         mdn_model.summary()
         
-        w1 = mdn_model.get_weights()[0]
-        b1 = mdn_model.get_weights()[1]
-        w2 = mdn_model.get_weights()[2]
-        b2 = mdn_model.get_weights()[3]
             
         
     else:
         mdn_model = None
 
-    dsmc = DSMCSimulation(n_particles=args.n_particles, n_steps=args.n_steps, time_step=args.time_step, mdn_model=mdn_model)
+    dsmc = DSMCSimulation(n_particles=args.n_particles, n_steps=args.n_steps, mdn_model=mdn_model)
     dsmc.run_simulation()
     print(f"Total elastic collisions: {dsmc.elastic_collisions}")
     print(f"Total inelastic collisions: {dsmc.inelastic_collisions}")
