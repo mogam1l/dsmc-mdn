@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 import tqdm
+from scipy.special import expit, logit, softmax
+from scipy.stats import norm
+import os
 
 import tf_keras
 import tensorflow_probability as tfp
@@ -15,7 +18,7 @@ np.random.seed(1)
 
 
 class DSMCSimulation:
-    def __init__(self, n_particles, n_steps, time_step=1e-6, use_mdn=False, mdn_model=None, T_tr_initial=167, T_rot_initial=1000, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
+    def __init__(self, n_particles, n_steps, time_step=1e-6, use_mdn=False, mdn_model=None, T_tr_initial=500, T_rot_initial=500, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
@@ -49,6 +52,11 @@ class DSMCSimulation:
         # Option to use the MDN-based surrogate model
         self.use_mdn = use_mdn
         self.mdn_model = mdn_model  # The MDN model passed during initialization
+        self.w1 = w1
+        self.w2 = w2
+        self.b1 = b1
+        self.b2 = b2
+        self.Ngauss = Ngauss
         
         # Initialize arrays for positions, velocities, and energies
         self.positions = self.initialize_positions()
@@ -106,24 +114,85 @@ class DSMCSimulation:
         epsilon = 1e-9  # Small value to avoid log(0) or division by zero
         x = np.clip(x, epsilon, 1 - epsilon)  # Ensure x is within (0, 1)
         return np.log(x / (1 - x))
+    
+    def softplus(self, x):
+        """Compute the Softplus function."""
+        return np.log1p(np.exp(x))  # Using log1p for numerical stability
 
+    def inverse_softplus(self, x):
+        """Compute the Inverse Softplus function."""
+        if np.any(x <= 0):
+            raise ValueError("Inverse Softplus is defined only for y > 0")
+        return np.log(np.expm1(x))  # Using expm1 for numerical stability
 
-    def mdn_energy_exchange(self, pre_collisional_energies):
-        """Use the trained MDN to predict post-collisional energies."""
-        # Input format: [log(E_c), inv_sigmoid(eps_t), inv_sigmoid(eps_r1)]
-        log_Ec, inv_eps_t, inv_eps_r1 = pre_collisional_energies
-        input_data = np.array([[log_Ec, inv_eps_t, inv_eps_r1]])
-
-        # Perform prediction
-        predictions = self.mdn_model.predict(input_data, verbose=0)
-
-        # Extract predictions and transform back
-        inv_eps_tp, inv_eps_r1p = predictions[0]
-        #Ec_post = np.exp(pre_collisional_energies[0])       #post total is precolissional total
-        eps_t_post = self.sigmoid(inv_eps_tp)
-        eps_r1_post = self.sigmoid(inv_eps_r1p)
-
-        return eps_t_post, eps_r1_post
+    def mdn_energy_exchange_new(self, Ec, eps_t, eps_rP):
+        
+        # Ensure inputs are numpy arrays
+        Ec = np.asarray(Ec)
+        eps_t = np.asarray(eps_t)
+        eps_rP = np.asarray(eps_rP)
+    
+        # Constructing input vector for MDN
+        input_vec = np.vstack((np.log(Ec), logit(eps_t), logit(eps_rP))).T  # Shape: (N, 3)
+    
+        # Initialize output matrices
+        output_HL = np.maximum(0, np.dot(input_vec, self.w1) + self.b1)  # ReLU activation
+    
+        output_OL = np.dot(output_HL, self.w2) + self.b2  # Linear activation
+    
+        N = len(output_OL[:,0])
+        # Initialize arrays for GMM parameters
+        weights = np.zeros((N, self.Ngauss))
+        mu_eps_t = np.zeros((N, self.Ngauss))
+        mu_eps_rP = np.zeros((N, self.Ngauss))
+        sigma_eps_t = np.zeros((N, self.Ngauss))
+        sigma_eps_rP = np.zeros((N, self.Ngauss))
+        
+        # Extracting parameters from the output layer
+        for i in range(self.Ngauss):
+            weights[:, i] = output_OL[:, i]
+            mu_eps_t[:, i] = output_OL[:, self.Ngauss + (i * 4)]
+            mu_eps_rP[:, i] = output_OL[:, (self.Ngauss + 1) + (i * 4)]
+            sigma_eps_t[:, i] = output_OL[:, (self.Ngauss + 2) + (i * 4)]
+            sigma_eps_rP[:, i] = output_OL[:, (self.Ngauss + 3) + (i * 4)]
+        
+        # Softmax for weights #to keep them positive
+        weights = softmax(weights)
+    
+        # Softplus for standard deviations#This seems hacky, does TF do this?
+        sigma_eps_t = self.softplus(sigma_eps_t)  # Softplus
+        sigma_eps_rP = self.softplus(sigma_eps_rP) # Softplus
+        
+    
+        # Sampling from mixture distribution
+        # N = input_vec.shape[0]
+        Un = np.random.rand(N)  # Draw random numbers for each input
+        mu_t, mu_rP, sigma_t, sigma_rP = np.zeros(N), np.zeros(N), np.zeros(N), np.zeros(N)
+    
+        # Loop through each instance to sample from the mixture model
+        for i in range(N):
+            weights_sum_vec = np.zeros(self.Ngauss)
+            weights_sum_vec[0] = weights[i, 0]
+            for j in range(1, self.Ngauss):
+                weights_sum_vec[j] = weights[i, j] + weights_sum_vec[j - 1]
+    
+            for j in range(self.Ngauss):
+                if Un[i] < weights_sum_vec[j]:
+                    mu_t[i] = mu_eps_t[i, j]
+                    mu_rP[i] = mu_eps_rP[i, j]
+                    sigma_t[i] = sigma_eps_t[i, j]
+                    sigma_rP[i] = sigma_eps_rP[i, j]
+                    break
+        
+        # Sampled normal distribution for eps_t and eps_rP
+        eps_t_p = norm.rvs(loc=mu_t, scale=sigma_t)  # Fraction of translational energy (post-collision)
+        eps_rP_p = norm.rvs(loc=mu_rP, scale=sigma_rP)  # Fraction of rotational energy in molecule P (post-collision)
+    
+        # Post-processing fractions back to [0, 1] range with Sigmoid function
+        eps_t_p = expit(eps_t_p)
+        eps_rP_p = expit(eps_rP_p)
+    
+        return eps_t_p, eps_rP_p#, translationalEnergy, ERotP, ERotQ
     
     def perform_collision(self, idx1, idx2 , max_rel_velocity):
         """Handle the collision between two particles using the regular Larsen-Borgnakke model."""
@@ -131,71 +200,128 @@ class DSMCSimulation:
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
         CM_velocity = 0.5 * (velocity1 + velocity2)
         b_parameter = self.compute_b_parameter(idx1,idx2)
+        
+        if use_mdn == False:
 
-        # Compute collision probability using fixed v_rel_max
-        collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
-        if np.random.rand() > collision_prob:
-            self.rejected_collisions += 1
-            return  # Skip collision if it does not happen based on collision probability
-
-        # Test for inelastic collision for the collision pair
-        if np.random.rand() > self.p_inelastic:  # Elastic collision
-            self.elastic_collisions += 1
-
-            # Isotropic scattering (randomize the relative velocity direction)
-            relative_speed = np.linalg.norm(relative_velocity)
-            new_relative_velocity = self.random_unit_vector() * relative_speed
-
-            # Update velocities
-            self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
-            self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
-            return
-
-        else:  # Inelastic collision using regular Larsen-Borgnakke model
-            self.inelastic_collisions += 1
-
-            # Total energy before collision
-            E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
-            E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-            E_total_pre = E_trans_pre + E_rot_pre
-
-            # Redistribute total energy among translational and rotational modes
-            energy_fraction_trans = np.random.rand()
-            E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
-            if E_tr_probability < np.random.rand():
+            # Compute collision probability using fixed v_rel_max
+            collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
+            if np.random.rand() > collision_prob:
+                self.rejected_collisions += 1
+                return  # Skip collision if it does not happen based on collision probability
+    
+            # Test for inelastic collision for the collision pair
+            if np.random.rand() > self.p_inelastic:  # Elastic collision
+                self.elastic_collisions += 1
+    
+                # Isotropic scattering (randomize the relative velocity direction)
+                relative_speed = np.linalg.norm(relative_velocity)
+                new_relative_velocity = self.random_unit_vector() * relative_speed
+    
+                # Update velocities
+                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
+                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
+                return
+    
+            else:  # Inelastic collision using regular Larsen-Borgnakke model
+                self.inelastic_collisions += 1
+    
+                # Total energy before collision
+                E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
+                E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+                E_total_pre = E_trans_pre + E_rot_pre
+    
+                # Redistribute total energy among translational and rotational modes
                 energy_fraction_trans = np.random.rand()
                 E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
-                return
-            else:
+                while E_tr_probability < np.random.rand():
+                    energy_fraction_trans = np.random.rand()
+                    E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
+                
                 E_trans_post = E_total_pre * energy_fraction_trans
                 E_rot_post = E_total_pre - E_trans_post
-
-            # Distribute rotational energy equally between the two molecules
-            energy_fraction_rot1 = np.random.rand()
-            E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
-            if E_rot1_probability < np.random.rand():
+    
+                # Distribute rotational energy equally between the two molecules
                 energy_fraction_rot1 = np.random.rand()
                 E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
-                return
-            else:
+                while E_rot1_probability < np.random.rand():
+                    energy_fraction_rot1 = np.random.rand()
+                    E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
+                
                 self.rotational_energy[idx1] = E_rot_post * energy_fraction_rot1
                 self.rotational_energy[idx2] = E_rot_post - self.rotational_energy[idx1]
+    
+                # Correct calculation of relative speed
+                relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
+                new_relative_velocity = self.random_unit_vector() * relative_speed
+    
+                # Update velocities
+                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
+                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
+    
+                # Energy conservation check
+                E_trans_post_check = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
+                E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+                E_total_post = E_trans_post_check + E_rot_post_check
+    
+                assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
+            
+        if use_mdn == True:
+            # Compute collision probability using fixed v_rel_max
+            collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
+            if np.random.rand() > collision_prob:
+                self.rejected_collisions += 1
+                return  # Skip collision if it does not happen based on collision probability
+    
+            # Test for inelastic collision for the collision pair
+            if np.random.rand() > self.p_inelastic:  # Elastic collision
+                self.elastic_collisions += 1
+    
+                # Isotropic scattering (randomize the relative velocity direction)
+                relative_speed = np.linalg.norm(relative_velocity)
+                new_relative_velocity = self.random_unit_vector() * relative_speed
+    
+                # Update velocities
+                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
+                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
+                return
+    
+            else:  # Inelastic collision using MDN-based surrogate model
+                self.inelastic_collisions += 1
+    
+                # Total energy before collision
+                E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
+                E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+                E_total_pre = E_trans_pre + E_rot_pre
+                
+                eps_t_pre = E_trans_pre / E_total_pre
+                eps_r1_pre = self.rotational_energy[idx1] / E_rot_pre
+                
+                eps_t_p, eps_r1_p = self.mdn_energy_exchange_new(E_total_pre, eps_t_pre, eps_r1_pre)
+                
+                
+                E_trans_post = E_total_pre * eps_t_p
+                E_rot_post = E_total_pre - E_trans_post
 
-            # Correct calculation of relative speed
-            relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
-            new_relative_velocity = self.random_unit_vector() * relative_speed
-
-            # Update velocities
-            self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
-            self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
-
-            # Energy conservation check
-            E_trans_post_check = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
-            E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-            E_total_post = E_trans_post_check + E_rot_post_check
-
-            assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
-
+                
+                self.rotational_energy[idx1] = E_rot_post * eps_r1_p
+                self.rotational_energy[idx2] = E_rot_post - self.rotational_energy[idx1]
+    
+                # Correct calculation of relative speed
+                relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
+                new_relative_velocity = self.random_unit_vector() * relative_speed
+    
+                # Update velocities
+                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
+                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
+    
+                # Energy conservation check
+                E_trans_post_check = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
+                E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+                E_total_post = E_trans_post_check + E_rot_post_check
+    
+                assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
+            
+                
 
 
     def random_unit_vector(self):
@@ -284,7 +410,7 @@ class DSMCSimulation:
                     # Calculate number of candidate collision pairs to be selected (based on the original code)
                     # select = coeff*number*(number-1)*crmax[jcell] 
                     n_candidate_pairs = int(self.coeff * n_cell_particles * (n_cell_particles - 1) * max_rel_velocity)
-                    print(f"Cell ({i}, {j}, {k}): {n_cell_particles} particles, {n_candidate_pairs} candidate pairs") 
+                    # print(f"Cell ({i}, {j}, {k}): {n_cell_particles} particles, {n_candidate_pairs} candidate pairs") 
                     # Print all the parameters for debugging
 
                     # Perform candidate collisions
@@ -352,9 +478,9 @@ if __name__ == "__main__":
     # Load the trained MDN model here (assuming TensorFlow model)
     parser = argparse.ArgumentParser(description="DSMC Simulation")
 
-    parser.add_argument("--mdn", type=str, default=None, help="Path to the trained MDN model")
-    parser.add_argument("--n_particles", type=int, default=10000, help="Number of particles")
-    parser.add_argument("--n_steps", type=int, default=2000, help="Number of steps")
+    parser.add_argument("--mdn", type=str, default="Original.h5", help="Path to the trained MDN model")
+    parser.add_argument("--n_particles", type=int, default=5000, help="Number of particles")
+    parser.add_argument("--n_steps", type=int, default=1000, help="Number of steps")
     parser.add_argument("--time_step", type=float, default=1e-6, help="Timestep in seconds")
 
     args = parser.parse_args()
@@ -362,6 +488,9 @@ if __name__ == "__main__":
     if args.mdn: ##--mdn path
         print("Using MDN model for energy exchange.")
         use_mdn = True
+        
+        # Disable oneDNN optimizations
+        os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0' #suppresses rounding error messages
         
         def build_model(NGAUSSIANS, ACTIVATION, NNEURONS):
             
@@ -382,14 +511,24 @@ if __name__ == "__main__":
 
             return model
 
+        # DN Properties
+        Ngauss = 20  # Number of Gaussians
+        Nneurons = 8  # Number of neurons in hidden layer
+        # Nneurons_OL = Ngauss * 2 * 2 + Ngauss  # Number of neurons in output layer        
 
-        mdn_model = build_model(20, 'relu', 8) #settings have to match otherwise the loaded weights won't wrork.
+        mdn_model = build_model(Ngauss, 'relu', Nneurons) #settings have to match otherwise the loaded weights won't wrork.
 
         #needed initialization step, probably determines the input size from here.
-        mdn_model(np.ones((3,3)))
+        mdn_model(np.ones((1,3)))
 
         mdn_model.load_weights(args.mdn)
         mdn_model.summary()
+        
+        w1 = mdn_model.get_weights()[0]
+        b1 = mdn_model.get_weights()[1]
+        w2 = mdn_model.get_weights()[2]
+        b2 = mdn_model.get_weights()[3]
+            
         
     else:
         use_mdn = False
