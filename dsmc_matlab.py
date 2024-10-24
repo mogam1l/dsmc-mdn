@@ -71,6 +71,13 @@ class DSMCSimulation:
         }
         self.tsamp = 0  # Total sampling time
 
+        # Lists to store energy data for plotting
+        self.translational_energy_history = []
+        self.rotational_energy_history = []
+        self.total_energy_history = []
+        self.elastic_collisions = 0
+        self.inelastic_collisions = 0
+
     def mover(self):
         """Move all particles and apply periodic boundary conditions."""
         # Move all particles
@@ -130,6 +137,7 @@ class DSMCSimulation:
                     if np.random.rand() < 1 / self.z_eff:
                         # Elastic collision
                         if cr / self.vrmax[jcell] > np.random.rand():
+                            self.elastic_collisions += 1
                             col += 1
                             vcm = 0.5 * (self.v[ip1] + self.v[ip2])
                             cos_th = 1 - 2 * np.random.rand()
@@ -143,20 +151,21 @@ class DSMCSimulation:
                             self.v[ip2] = vcm - 0.5 * vrel
                     else:
                         # Inelastic collision
+                        self.inelastic_collisions += 1
                         col += 1
                         E_tr = 0.5 * m_r * cr**2
-                        E_i = self.rot_energy[ip1] + self.rot_energy[ip2]
-                        E_tot = E_tr + E_i
+                        E_i = self.rot_energy[ip1] + self.rot_energy[ip2] # Initial internal energy
+                        E_tot = E_tr + E_i # Total pre collision energy
                         # Energy redistribution loop
-                        while True:
-                            R2 = np.random.rand()
-                            a = (((5 / 2 - self.omega) / (3 / 2 - self.omega)) * R2)**(3 / 2 - self.omega)
-                            b = (3 / 2 - self.omega) * (1 - R2)
-                            ratio = a * b
-                            R3 = np.random.rand()
-                            if ratio > R3:
+                        while True: # Loop until you find a good R2?
+                            R2 = np.random.rand() 
+                            apple = (((5 / 2 - self.omega) / (3 / 2 - self.omega)) * R2)**(3 / 2 - self.omega) 
+                            banana = (3 / 2 - self.omega) * (1 - R2) 
+                            ratio_ab = apple * banana
+                            R3_random = np.random.rand()
+                            if ratio_ab > R3_random:
                                 break
-                        E_tr_post = R2 * E_tot
+                        E_tr_post = R2 * E_tot # Post collision translational energy
                         E_i_post = E_tot - E_tr_post
                         R_i = np.random.rand()
                         self.rot_energy[ip1] = R_i * E_i_post
@@ -203,6 +212,13 @@ class DSMCSimulation:
         self.sampData['ave_rot'] += sum_rot
         self.sampData['nsamp'] += 1
 
+    def compute_energy(self):
+        """Compute total translational and rotational energy."""
+        kinetic_energy = 0.5 * self.mass * np.sum(self.v**2)
+        rotational_energy = np.sum(self.rot_energy)
+        total_energy = kinetic_energy + rotational_energy
+        return kinetic_energy, rotational_energy, total_energy
+
     def run_simulation(self):
         """Main simulation loop."""
         colSum = 0
@@ -215,6 +231,13 @@ class DSMCSimulation:
             if istep > nstep_10:
                 self.sampler()
                 self.tsamp += self.tau
+
+                # Compute energies and store them
+                ke, re, te = self.compute_energy()
+                self.translational_energy_history.append(ke)
+                self.rotational_energy_history.append(re)
+                self.total_energy_history.append(te)
+
             if istep % 10 == 0:
                 print(f'Finished {istep} of {self.nstep} steps, Collisions = {colSum}')
 
@@ -246,6 +269,20 @@ class DSMCSimulation:
         plt.grid(True)
         plt.show()
 
+    def plot_energy_relaxation(self):
+        """Plot the energy relaxation over time."""
+        steps = np.arange(len(self.translational_energy_history))
+        plt.figure(figsize=(10, 6))
+        plt.plot(steps, self.translational_energy_history, label='Translational Energy')
+        plt.plot(steps, self.rotational_energy_history, label='Rotational Energy')
+        plt.plot(steps, self.total_energy_history, label='Total Energy')
+        plt.xlabel('Time Step')
+        plt.ylabel('Energy (J)')
+        plt.title('Energy Relaxation over Time')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
 # Example usage:
 if __name__ == "__main__":
     npart = int(input('Enter number of simulation particles: '))
@@ -255,3 +292,6 @@ if __name__ == "__main__":
     dsmc.run_simulation()
     dsmc.compute_results()
     dsmc.plot_results()
+    dsmc.plot_energy_relaxation()
+    print(f'Number of elastic collisions: {dsmc.elastic_collisions}')
+    print(f'Number of inelastic collisions: {dsmc.inelastic_collisions}')
