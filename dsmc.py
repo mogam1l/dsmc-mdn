@@ -18,7 +18,7 @@ np.random.seed(1)
 
 
 class DSMCSimulation:
-    def __init__(self, n_particles, n_steps, time_step=1e-6, use_mdn=False, mdn_model=None, T_tr_initial=500, T_rot_initial=500, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
+    def __init__(self, n_particles, n_steps, time_step=1e-6, mdn_model=None, T_tr_initial=167, T_rot_initial=1000, Z_r=245, domain_size=6.4e-4, n_cells=10, sigma_collision=2.92e-10):
         # Simulation parameters
         self.n_particles = n_particles
         self.n_steps = n_steps
@@ -50,13 +50,18 @@ class DSMCSimulation:
         self.coeff = 0.5 * self.eff_num * np.pi * self.sigma_collision**2 * self.time_step / (self.domain_size**3 / self.n_cells)
 
         # Option to use the MDN-based surrogate model
-        self.use_mdn = use_mdn
-        self.mdn_model = mdn_model  # The MDN model passed during initialization
-        self.w1 = w1
-        self.w2 = w2
-        self.b1 = b1
-        self.b2 = b2
-        self.Ngauss = Ngauss
+        if mdn_model is not None:
+            print("Using MDN model for energy exchange.")
+            self.use_mdn = True
+            self.mdn_model = mdn_model  # The MDN model passed during initialization
+            self.w1 = self.mdn_model.get_weights()[0]
+            self.b1 = self.mdn_model.get_weights()[1]
+            self.w2 = self.mdn_model.get_weights()[2]
+            self.b2 = self.mdn_model.get_weights()[3]
+            self.Ngauss = Ngauss
+        else:
+            print("Using regular Larsen-Borgnakke model for energy exchange.")
+            self.use_mdn = False
         
         # Initialize arrays for positions, velocities, and energies
         self.positions = self.initialize_positions()
@@ -194,133 +199,95 @@ class DSMCSimulation:
     
         return eps_t_p, eps_rP_p#, translationalEnergy, ERotP, ERotQ
     
+    def update_energy_and_velocity(self, idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity):
+        E_trans_post = E_total_pre * energy_fraction_trans
+        E_rot_post = E_total_pre - E_trans_post
+ 
+        self.rotational_energy[idx1] = E_rot_post * energy_fraction_rot1
+        self.rotational_energy[idx2] = E_rot_post - self.rotational_energy[idx1]
+
+        # Correct calculation of relative speed
+        relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
+        new_relative_velocity = self.random_unit_vector() * relative_speed
+
+        # Update velocities
+        self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
+        self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
+
+        # Energy conservation check
+        E_trans_post_check = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
+        E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+        E_total_post = E_trans_post_check + E_rot_post_check
+
+        assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
+    
     def perform_collision(self, idx1, idx2 , max_rel_velocity):
         """Handle the collision between two particles using the regular Larsen-Borgnakke model."""
         velocity1, velocity2 = self.velocities[idx1], self.velocities[idx2]
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
         CM_velocity = 0.5 * (velocity1 + velocity2)
         b_parameter = self.compute_b_parameter(idx1,idx2)
-        
-        if use_mdn == False:
 
-            # Compute collision probability using fixed v_rel_max
-            collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
-            if np.random.rand() > collision_prob:
-                self.rejected_collisions += 1
-                return  # Skip collision if it does not happen based on collision probability
-    
-            # Test for inelastic collision for the collision pair
-            if np.random.rand() > self.p_inelastic:  # Elastic collision
-                self.elastic_collisions += 1
-    
-                # Isotropic scattering (randomize the relative velocity direction)
-                relative_speed = np.linalg.norm(relative_velocity)
-                new_relative_velocity = self.random_unit_vector() * relative_speed
-    
-                # Update velocities
-                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
-                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
-                return
-    
-            else:  # Inelastic collision using regular Larsen-Borgnakke model
-                self.inelastic_collisions += 1
-    
-                # Total energy before collision
-                E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
-                E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-                E_total_pre = E_trans_pre + E_rot_pre
-    
-                # Redistribute total energy among translational and rotational modes
+        # Compute collision probability using fixed v_rel_max
+        collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
+        if np.random.rand() > collision_prob:
+            self.rejected_collisions += 1
+            return  # Skip collision if it does not happen based on collision probability
+
+        # Test for elastic collision for the collision pair
+        if np.random.rand() > self.p_inelastic:  # If true: Elastic collision will happen
+            self.elastic_collisions += 1
+
+            # Isotropic scattering (randomize the relative velocity direction)
+            relative_speed = np.linalg.norm(relative_velocity)
+            new_relative_velocity = self.random_unit_vector() * relative_speed
+
+            # Update velocities
+            self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
+            self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
+            return
+        
+        if self.use_mdn == False:  # Inelastic collision using regular Larsen-Borgnakke model
+            self.inelastic_collisions += 1
+
+            # Total energy before collision
+            E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
+            E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+            E_total_pre = E_trans_pre + E_rot_pre
+
+            # Redistribute total energy among translational and rotational modes
+            energy_fraction_trans = np.random.rand()
+            E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
+            while E_tr_probability < np.random.rand():
                 energy_fraction_trans = np.random.rand()
                 E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
-                while E_tr_probability < np.random.rand():
-                    energy_fraction_trans = np.random.rand()
-                    E_tr_probability = ((self.dof_rot + 0.5 - self.omega)/(1.5 - self.omega) * energy_fraction_trans)**(1.5 - self.omega) * ((self.dof_rot + 0.5 - self.omega)/(self.dof_rot - 1) * (1 - energy_fraction_trans))**(self.dof_rot - 1)
-                
-                E_trans_post = E_total_pre * energy_fraction_trans
-                E_rot_post = E_total_pre - E_trans_post
-    
-                # Distribute rotational energy equally between the two molecules
+            
+            # Distribute rotational energy equally between the two molecules
+            energy_fraction_rot1 = np.random.rand()
+            E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
+            while E_rot1_probability < np.random.rand():
                 energy_fraction_rot1 = np.random.rand()
                 E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
-                while E_rot1_probability < np.random.rand():
-                    energy_fraction_rot1 = np.random.rand()
-                    E_rot1_probability = 2**(self.dof_rot - 2) * energy_fraction_rot1**(self.dof_rot/2 - 1) * (1 - energy_fraction_rot1)**(self.dof_rot/2 - 1)
-                
-                self.rotational_energy[idx1] = E_rot_post * energy_fraction_rot1
-                self.rotational_energy[idx2] = E_rot_post - self.rotational_energy[idx1]
-    
-                # Correct calculation of relative speed
-                relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
-                new_relative_velocity = self.random_unit_vector() * relative_speed
-    
-                # Update velocities
-                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
-                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
-    
-                # Energy conservation check
-                E_trans_post_check = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
-                E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-                E_total_post = E_trans_post_check + E_rot_post_check
-    
-                assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
-            
-        if use_mdn == True:
-            # Compute collision probability using fixed v_rel_max
-            collision_prob = np.linalg.norm(relative_velocity) / max_rel_velocity
-            if np.random.rand() > collision_prob:
-                self.rejected_collisions += 1
-                return  # Skip collision if it does not happen based on collision probability
-    
-            # Test for inelastic collision for the collision pair
-            if np.random.rand() > self.p_inelastic:  # Elastic collision
-                self.elastic_collisions += 1
-    
-                # Isotropic scattering (randomize the relative velocity direction)
-                relative_speed = np.linalg.norm(relative_velocity)
-                new_relative_velocity = self.random_unit_vector() * relative_speed
-    
-                # Update velocities
-                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
-                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
-                return
-    
-            else:  # Inelastic collision using MDN-based surrogate model
-                self.inelastic_collisions += 1
-    
-                # Total energy before collision
-                E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
-                E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-                E_total_pre = E_trans_pre + E_rot_pre
-                
-                eps_t_pre = E_trans_pre / E_total_pre
-                eps_r1_pre = self.rotational_energy[idx1] / E_rot_pre
-                
-                eps_t_p, eps_r1_p = self.mdn_energy_exchange_new(E_total_pre, eps_t_pre, eps_r1_pre)
-                
-                
-                E_trans_post = E_total_pre * eps_t_p
-                E_rot_post = E_total_pre - E_trans_post
 
-                
-                self.rotational_energy[idx1] = E_rot_post * eps_r1_p
-                self.rotational_energy[idx2] = E_rot_post - self.rotational_energy[idx1]
-    
-                # Correct calculation of relative speed
-                relative_speed = np.sqrt(4 * E_trans_post / self.m_H2)
-                new_relative_velocity = self.random_unit_vector() * relative_speed
-    
-                # Update velocities
-                self.velocities[idx1] = CM_velocity + 0.5 * new_relative_velocity
-                self.velocities[idx2] = CM_velocity - 0.5 * new_relative_velocity
-    
-                # Energy conservation check
-                E_trans_post_check = 0.25 * self.m_H2 * np.sum(new_relative_velocity**2)
-                E_rot_post_check = self.rotational_energy[idx1] + self.rotational_energy[idx2]
-                E_total_post = E_trans_post_check + E_rot_post_check
-    
-                assert np.isclose(E_total_pre, E_total_post, atol=1e-10), "Energy conservation violated!"
+            #  update_energy_and_velocity(self, idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity):
+            self.update_energy_and_velocity(idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity)
+
             
+        elif self.use_mdn == True: # Inelastic collision using MDN-based surrogate model
+            self.inelastic_collisions += 1
+
+            # Total energy before collision
+            E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
+            E_rot_pre = self.rotational_energy[idx1] + self.rotational_energy[idx2]
+            E_total_pre = E_trans_pre + E_rot_pre
+            
+            eps_t_pre = E_trans_pre / E_total_pre
+            eps_r1_pre = self.rotational_energy[idx1] / E_rot_pre
+            
+            energy_fraction_trans, energy_fraction_rot1 = self.mdn_energy_exchange_new(E_total_pre, eps_t_pre, eps_r1_pre)
+            
+            #  update_energy_and_velocity(self, idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity):
+            self.update_energy_and_velocity(idx1, idx2, E_total_pre, energy_fraction_trans, energy_fraction_rot1, CM_velocity)
                 
 
 
@@ -478,15 +445,15 @@ if __name__ == "__main__":
     # Load the trained MDN model here (assuming TensorFlow model)
     parser = argparse.ArgumentParser(description="DSMC Simulation")
 
-    parser.add_argument("--mdn", type=str, default="Original.h5", help="Path to the trained MDN model")
+    parser.add_argument("--mdn_model", type=str, default=None, help="Path to the trained MDN model")
     parser.add_argument("--n_particles", type=int, default=5000, help="Number of particles")
     parser.add_argument("--n_steps", type=int, default=1000, help="Number of steps")
     parser.add_argument("--time_step", type=float, default=1e-6, help="Timestep in seconds")
 
     args = parser.parse_args()
 
-    if args.mdn: ##--mdn path
-        print("Using MDN model for energy exchange.")
+    if args.mdn_model: ##--mdn path
+        print(f"Loading MDN model from {args.mdn_model}")
         use_mdn = True
         
         # Disable oneDNN optimizations
@@ -521,7 +488,7 @@ if __name__ == "__main__":
         #needed initialization step, probably determines the input size from here.
         mdn_model(np.ones((1,3)))
 
-        mdn_model.load_weights(args.mdn)
+        mdn_model.load_weights(args.mdn_model)
         mdn_model.summary()
         
         w1 = mdn_model.get_weights()[0]
@@ -531,14 +498,12 @@ if __name__ == "__main__":
             
         
     else:
-        use_mdn = False
         mdn_model = None
 
-    dsmc = DSMCSimulation(n_particles=args.n_particles, n_steps=args.n_steps, time_step=args.time_step, use_mdn=use_mdn, mdn_model=mdn_model)
+    dsmc = DSMCSimulation(n_particles=args.n_particles, n_steps=args.n_steps, time_step=args.time_step, mdn_model=mdn_model)
     dsmc.run_simulation()
     print(f"Total elastic collisions: {dsmc.elastic_collisions}")
     print(f"Total inelastic collisions: {dsmc.inelastic_collisions}")
     print(f"Total rejected collisions percentage: {dsmc.rejected_collisions/ (dsmc.elastic_collisions + dsmc.inelastic_collisions + dsmc.rejected_collisions) * 100}%")
     dsmc.plot_energy_relaxation_T()
-    dsmc.plot_energy_relaxation()
     dsmc.plot_positions()
