@@ -253,13 +253,24 @@ class DSMCSimulation:
         # self.log_writer.writerow(['time_step', 'collision_type', 'b_parameter', 'E_tr_pre', 'E_tr_post', 'E_rotA_pre', 'E_rotA_post', 'E_rotB_pre', 'E_rotB_post'])
         self.log_writer.writerow([self.current_step*self.time_step, "inelastic", self.b_parameter, self.E_trans_pre, E_trans_post, self.E_rot_pre_idx1, self.rotational_energy[idx1], self.E_rot_pre_idx2, self.rotational_energy[idx2]])
     
-    def perform_collision(self, idx1, idx2 , max_rel_velocity):
+    def perform_collision(self, idx1, idx2 , max_rel_velocity, bmin, bmax):
         """Handle the collision between two particles using the regular Larsen-Borgnakke model."""
         velocity1, velocity2 = self.velocities[idx1], self.velocities[idx2]
         relative_velocity = self.calculate_relative_velocity(velocity1, velocity2)
         CM_velocity = 0.5 * (velocity1 + velocity2)
-        self.b_parameter = self.compute_b_parameter(idx1,idx2)
-        # Total energy before collision
+        
+        # Scale the b-parameter between 0 and 1.5
+        b = self.compute_b_parameter(idx1,idx2)
+        if bmax - bmin == 0:
+            b_scaled = 0.75  # Default value when all b-parameters are equal
+        else:
+            b_scaled = ((b - bmin) / (bmax - bmin)) * 1.5
+
+        self.b_parameter = b_scaled  # Store the scaled b-parameter
+        
+        # print b before and after scaling
+        # print(f"b: {b}, b_scaled: {b_scaled}, min_b: {bmin}, max_b: {bmax}")
+        assert b_scaled >= 0 , "Scaled b parameter is negative"
 
         self.E_trans_pre = 0.25 * self.m_H2 * np.sum(relative_velocity**2)
         self.E_rot_pre_idx1 = self.rotational_energy[idx1].copy()
@@ -349,6 +360,47 @@ class DSMCSimulation:
                     max_rel_velocity = rel_velocity_magnitude
 
         return max_rel_velocity
+    
+    def min_max_b_parameters_in_cell(self, cell_particles):
+        """Calculate the minimum and maximum b-parameters among all pairs in a cell."""
+        min_b_parameter = float('inf')
+        max_b_parameter = float('-inf')
+        for i in range(len(cell_particles)):
+            for j in range(i + 1, len(cell_particles)):
+                idx1, idx2 = cell_particles[i], cell_particles[j]
+                b_parameter = self.compute_b_parameter(idx1, idx2)
+                if b_parameter > max_b_parameter:
+                    max_b_parameter = b_parameter
+                if b_parameter < min_b_parameter:
+                    min_b_parameter = b_parameter
+        return min_b_parameter, max_b_parameter
+    
+    # function that calculates the minimum and maximum b-parameters among all pairs in a cell and the max relative velocity
+    def min_max_b_parameters_in_cell_and_max_rel_velocity(self, cell_particles):
+        min_b_parameter = float('inf')
+        max_b_parameter = float('-inf')
+        max_rel_velocity = 0
+        for i in range(len(cell_particles)):
+            for j in range(i + 1, len(cell_particles)):
+
+                # Calculate the max and min b-parameter in the cell.
+                idx1, idx2 = cell_particles[i], cell_particles[j]
+                b_parameter = self.compute_b_parameter(idx1, idx2)
+                if b_parameter > max_b_parameter:
+                    max_b_parameter = b_parameter
+                if b_parameter < min_b_parameter:
+                    min_b_parameter = b_parameter
+
+                
+                # Calculate the max relative velocity in the cell.
+                rel_velocity = self.calculate_relative_velocity(self.velocities[idx1], self.velocities[idx2])
+                rel_velocity_magnitude = np.linalg.norm(rel_velocity)
+                if rel_velocity_magnitude > max_rel_velocity:
+                    max_rel_velocity = rel_velocity_magnitude
+
+        return min_b_parameter, max_b_parameter, max_rel_velocity
+
+
 
     def calculate_relative_velocity(self, vel1, vel2):
         """Calculate the relative velocity between two particles."""
@@ -370,11 +422,33 @@ class DSMCSimulation:
         self.positions = np.mod(self.positions, self.domain_size) # PERIODIC BOUNDARY CONDITIONS
         
     def compute_b_parameter(self, id1, id2):
-        """Compute b parameter based on the direction of the relative velocity vector and the particle positions"""
-        time_of_collision = (self.positions[id1] - self.positions[id2])/(self.velocities[id1] - self.velocities[id2])
-        pos1 = self.positions[id1] + self.velocities[id1] * time_of_collision
-        pos2 = self.positions[id2] + self.velocities[id2] * time_of_collision
-        b_parameter = np.linalg.norm(pos1 - pos2)
+        """Compute the impact parameter (b-parameter) between two particles."""
+        # Get positions and velocities of the particles
+        r1 = self.positions[id1]
+        r2 = self.positions[id2]
+        v1 = self.velocities[id1]
+        v2 = self.velocities[id2]
+
+        # Compute relative position and relative velocity
+        r_rel = r1 - r2
+        v_rel = v1 - v2
+
+        # Compute the cross product of r_rel and v_rel
+        cross_product = np.cross(r_rel, v_rel)
+
+        # Compute the magnitude of the cross product
+        cross_magnitude = np.linalg.norm(cross_product)
+
+        # Compute the magnitude of the relative velocity
+        v_rel_magnitude = np.linalg.norm(v_rel)
+
+        # Avoid division by zero in case v_rel_magnitude is zero
+        if v_rel_magnitude == 0:
+            b_parameter = 0
+        else:
+            # Compute the impact parameter
+            b_parameter = cross_magnitude / v_rel_magnitude
+
         return b_parameter
 
     def plot_positions(self):
@@ -409,19 +483,18 @@ class DSMCSimulation:
                     if n_cell_particles < 2:
                         continue  # No collisions in a cell with less than 2 particles
 
-                    # Calculate the maximum relative velocity in the cell
-                    max_rel_velocity = self.max_relative_velocity_in_cell(cell_particles)
-
                     # Calculate number of candidate collision pairs to be selected (based on the original code)
-                    # select = coeff*number*(number-1)*crmax[jcell] 
+                    max_rel_velocity = self.max_relative_velocity_in_cell(cell_particles)
                     n_candidate_pairs = int(self.coeff * n_cell_particles * (n_cell_particles - 1) * max_rel_velocity)
-                    # print(f"Cell ({i}, {j}, {k}): {n_cell_particles} particles, {n_candidate_pairs} candidate pairs") 
-                    # Print all the parameters for debugging
 
                     # Perform candidate collisions
                     for _ in range(n_candidate_pairs):
+                        # Calculate the maximum relative velocity in the cell
+                        # max_rel_velocity = self.max_relative_velocity_in_cell(cell_particles)
+                        # bmin, bmax = self.min_max_b_parameters_in_cell(cell_particles)
+                        bmin, bmax, max_rel_velocity = self.min_max_b_parameters_in_cell_and_max_rel_velocity(cell_particles)
                         idx1, idx2 = np.random.choice(cell_particles, 2, replace=False)
-                        self.perform_collision(idx1, idx2, max_rel_velocity)
+                        self.perform_collision(idx1, idx2, max_rel_velocity, bmin, bmax)
 
     def run_simulation(self, mode='full'):
         """Main simulation loop."""
