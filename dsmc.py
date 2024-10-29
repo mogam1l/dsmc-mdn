@@ -98,17 +98,31 @@ class DSMCSimulation:
         
         # Ensure that the directory exists
         os.makedirs(self.folder_name, exist_ok=True)
+
+        date_time = datetime.now().strftime("%d_%m_%Y-%H:%M:%S")
         
         # Open the log file for writing
-        self.log_file = open(self.folder_name + "/simulation_data_"  + datetime.now().strftime("%d_%m_%Y-%H:%M:%S") + ".csv" , 'w', newline='')
+        self.log_file = open(self.folder_name + "/simulation_data_"  + date_time + ".csv" , 'w', newline='')
         self.log_writer = csv.writer(self.log_file)
-        
-        # Write headers
         self.log_writer.writerow(['time_step', 'collision_type', 'b_parameter', 'E_tr_pre', 'E_tr_post', 'E_rotA_pre', 'E_rotA_post', 'E_rotB_pre', 'E_rotB_post'])
+
+        # Log the initial snapshot data
+        self.snapshot_file_first = open(self.folder_name + "/snapshot_data_first"  + date_time + ".csv" , 'w', newline='')
+        self.snapshot_writer_first = csv.writer(self.snapshot_file_first)
+        self.snapshot_writer_first.writerow(['Etr', 'Erot'])
+
+        # Log the final snapshot data
+        self.snapshot_file_last = open(self.folder_name + "/snapshot_data_last"  + date_time + ".csv" , 'w', newline='')
+        self.snapshot_writer_last = csv.writer(self.snapshot_file_last)
+        self.snapshot_writer_last.writerow(['Etr', 'Erot'])
+
 
     def close_logger(self):
         """Close the collision logger file."""
         self.log_file.close()
+        self.snapshot_file_first.close()
+        self.snapshot_file_last.close()
+
 
     def initialize_velocities(self, T):
         """Initialize velocities based on Maxwell-Boltzmann distribution."""
@@ -502,6 +516,11 @@ class DSMCSimulation:
         self.translational_energy_history = []
         self.rotational_energy_history = []
 
+        # Log all energies before the first step  
+        for idx in range(len(self.velocities)):
+            velocity = self.velocities[idx]  # velocity will be [x, y, z] for each particle
+            self.snapshot_writer_first.writerow([self.compute_kinetic_energy(velocity), self.rotational_energy[idx]])
+
         # Run the simulation for the defined number of steps
         with tqdm.tqdm(total=self.n_steps) as pbar:
             for step in range(self.n_steps):
@@ -521,6 +540,12 @@ class DSMCSimulation:
 
                 pbar.update(1)
 
+        
+        # Log all energies after the last step
+        for idx in range(len(self.velocities)):
+            velocity = self.velocities[idx]  # velocity will be [x, y, z] for each particle
+            self.snapshot_writer_last.writerow([self.compute_kinetic_energy(velocity), self.rotational_energy[idx]])
+        
         print("Simulation complete.")
         self.close_logger()
 
