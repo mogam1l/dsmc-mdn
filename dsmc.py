@@ -73,7 +73,6 @@ class DSMCSimulation:
         # Initialize spatial cells
         self.cells = np.zeros((self.n_cells, self.n_cells, self.n_cells), dtype=object)
         self.cell_size = self.domain_size / self.n_cells
-        self.volume_cell = self.cell_size ** 3  # Volume of each cell
         
         # Energy history for plotting
         self.translational_energy_history = []
